@@ -1,0 +1,5 @@
+Adafruit CircuitPython 9.2.1 on 2024-11-20; Raspberry Pi Pico W with rp2040
+Board ID:raspberry_pi_pico_w
+UID:E66141040341B62D
+MAC:28:CD:C1:0E:80:12
+boot.py output:

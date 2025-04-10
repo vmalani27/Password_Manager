@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Password Manager</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .feedback {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .tabs {
+            margin-bottom: 20px;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 16px;
+        }
+        .tab.active {
+            border-bottom: 2px solid #4CAF50;
+            color: #4CAF50;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .credentials-list {
+            margin-top: 20px;
+        }
+        .credential-item {
+            padding: 10px;
+            border: 1px solid #ddd;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .credential-item:hover {
+            background-color: #f9f9f9;
+        }
+        .service-name {
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        .timestamp {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .credential-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .action-button {
+            padding: 5px 10px;
+            font-size: 14px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .action-button:hover {
+            background-color: #45a049;
+        }
+        .search-box {
+            margin-bottom: 20px;
+        }
+        .search-box input {
+            width: 100%;
+            padding: 10px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+        }
+        .search-box input:focus {
+            border-color: #4CAF50;
+            outline: none;
+        }
+        .autofill-popup {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+            display: none;
+        }
+        .autofill-popup.active {
+            display: block;
+        }
+        .autofill-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .close-button {
+            background: none;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            color: #666;
+        }
+        .update-popup {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+            display: none;
+            max-width: 500px;
+            width: 90%;
+        }
+        .update-popup.active {
+            display: block;
+        }
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0,0,0,0.5);
+            z-index: 999;
+            display: none;
+        }
+        .overlay.active {
+            display: block;
+        }
+        .update-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .update-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+        .cancel-button {
+            background-color: #f44336;
+        }
+        .cancel-button:hover {
+            background-color: #d32f2f;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .logout-button {
+            background-color: #f44336;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .logout-button:hover {
+            background-color: #d32f2f;
+        }
+        .snackbar {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #333;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 4px;
+            font-size: 14px;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        .snackbar.show {
+            opacity: 1;
+        }
+        .password-strength-meter {
+            height: 4px;
+            background-color: #f5f5f5;
+            margin-top: 5px;
+            border-radius: 2px;
+        }
+        .password-strength-meter div {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.3s ease-in-out;
+        }
+        .strength-weak { background-color: #ff5252; }
+        .strength-medium { background-color: #ffd740; }
+        .strength-strong { background-color: #4caf50; }
+        .password-suggestions {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+        }
+        .suggestion-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            margin: 5px 0;
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .suggestion-item:hover {
+            background-color: #f9f9f9;
+        }
+        .suggestion-password {
+            font-family: monospace;
+            font-size: 14px;
+        }
+        .use-password-btn {
+            background-color: #2196F3;
+            color: white;
+            padding: 4px 8px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .use-password-btn:hover {
+            background-color: #1976D2;
+        }
+        .generate-btn {
+            background-color: #2196F3;
+            margin-left: 10px;
+        }
+        .generate-btn:hover {
+            background-color: #1976D2;
+        }
+        .suggestions-container {
+            position: relative;
+        }
+        .suggestions-list {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            z-index: 1000;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        .suggestion-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .suggestion-item:hover {
+            background-color: #f5f5f5;
+        }
+        .suggestion-item.selected {
+            background-color: #e3f2fd;
+        }
+        .input-with-suggestions {
+            position: relative;
+            width: 100%;
+        }
+        .edit-form {
+            display: none;
+            padding: 15px;
+            margin-top: -10px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-top: none;
+            border-radius: 0 0 4px 4px;
+            background-color: #f9f9f9;
+        }
+        .edit-form.active {
+            display: block;
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .credential-actions {
+                flex-direction: column;
+                gap: 5px;
+            }
+            .action-button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Password Manager</h1>
+            <a href="{{ url_for('logout') }}" class="logout-button">Logout</a>
+        </div>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('add')">Add Credential</button>
+            <button class="tab" onclick="showTab('list')">View Credentials</button>
+            <button class="tab" onclick="showTab('autofill')">Autofill</button>
+        </div>
+
+        <div id="add" class="tab-content active">
+            <h2>Add New Credential</h2>
+            <div class="form-group">
+                <label for="service-name">Service Name:</label>
+                <div class="input-with-suggestions">
+                    <input type="text" id="service-name" required placeholder="e.g., Gmail, Facebook, etc." oninput="handleServiceInput(event)">
+                    <div id="service-suggestions" class="suggestions-list"></div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="username">Username:</label>
+                <div class="input-with-suggestions">
+                    <input type="text" id="username" required placeholder="Enter username or email" oninput="handleUsernameInput(event)">
+                    <div id="username-suggestions" class="suggestions-list"></div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="password">Password:</label>
+                <div class="input-with-suggestions">
+                    <input type="password" id="password" required placeholder="Enter password" oninput="checkPasswordStrength(event)">
+                    <div class="password-strength-meter">
+                        <div id="strength-meter"></div>
+                    </div>
+                    <div id="password-requirements" class="password-requirements"></div>
+                </div>
+                <button class="generate-btn" onclick="generatePasswordSuggestions('add')">Generate Strong Password</button>
+            </div>
+            <div id="password-suggestions" class="password-suggestions"></div>
+            <button onclick="addCredential()">Add Credential</button>
+            <div id="add-feedback" class="feedback"></div>
+        </div>
+
+        <div id="list" class="tab-content">
+            <h2>Saved Credentials</h2>
+            <div id="credentials-list" class="credentials-list">
+                <!-- Credentials will be loaded here -->
+            </div>
+            <div id="list-feedback" class="feedback"></div>
+        </div>
+
+        <div id="autofill" class="tab-content">
+            <h2>Password Autofill</h2>
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="Search for a service or username..." oninput="searchCredentials()">
+            </div>
+            <div id="search-results" class="credentials-list">
+                <!-- Search results will appear here -->
+            </div>
+            <div id="autofill-feedback" class="feedback"></div>
+        </div>
+    </div>
+
+    <div id="autofill-popup" class="autofill-popup">
+        <div class="autofill-header">
+            <h3>Autofill Credentials</h3>
+            <button class="close-button" onclick="closeAutofillPopup()">&times;</button>
+        </div>
+        <div id="autofill-content">
+            <!-- Autofill content will appear here -->
+        </div>
+    </div>
+
+    <div class="overlay" id="overlay"></div>
+    <div class="update-popup" id="update-popup">
+        <div class="update-header">
+            <h3>Update Existing Credential</h3>
+            <button class="close-button" onclick="closeUpdatePopup()">&times;</button>
+        </div>
+        <div class="form-group">
+            <label>Current Username:</label>
+            <div id="current-username"></div>
+        </div>
+        <div class="form-group">
+            <label for="update-username">New Username:</label>
+            <input type="text" id="update-username" required>
+        </div>
+        <div class="form-group">
+            <label for="update-password">New Password:</label>
+            <div style="display: flex; align-items: center;">
+                <input type="password" id="update-password" required>
+                <button class="generate-btn" onclick="generatePasswordSuggestions('edit', '${credentialId}')">Suggest</button>
+            </div>
+        </div>
+        <div id="edit-password-suggestions-${credentialId}" class="password-suggestions" style="display: none;"></div>
+        <div class="update-actions">
+            <button class="action-button cancel-button" onclick="closeUpdatePopup()">Cancel</button>
+            <button class="action-button" onclick="updateCredential()">Update</button>
+        </div>
+        <div id="update-feedback" class="feedback"></div>
+    </div>
+
+    <div id="snackbar" class="snackbar"></div>
+
+    <script>
+        let currentTab = 'add';
+        let searchTimeout = null;
+        let currentCredentialId = null;
+        let suggestionTimeouts = {};
+
+        function showTab(tabName) {
+            // Hide all tab contents first
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+                tab.style.display = 'none';
+            });
+
+            // Remove active class from all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+
+            // Show selected tab content and activate tab
+            const selectedTab = document.getElementById(tabName);
+            const selectedTabButton = document.querySelector(`.tab[onclick="showTab('${tabName}')"]`);
+            
+            if (selectedTab && selectedTabButton) {
+                selectedTab.classList.add('active');
+                selectedTab.style.display = 'block';
+                selectedTabButton.classList.add('active');
+                currentTab = tabName;
+                
+                // Load credentials if viewing list tab
+                if (tabName === 'list') {
+                    loadCredentials();
+                } else if (tabName === 'autofill') {
+                    document.getElementById('search-input').focus();
+                }
+            }
+        }
+
+        // Call showTab on initial load to ensure correct tab is shown
+        document.addEventListener('DOMContentLoaded', () => {
+            showTab('add');
+        });
+
+        function showFeedback(elementId, message, isError = false) {
+            const feedback = document.getElementById(elementId);
+            feedback.textContent = message;
+            feedback.className = `feedback ${isError ? 'error' : 'success'}`;
+        }
+
+        async function addCredential() {
+            // Prevent duplicate submissions
+            const submitButton = document.querySelector('#add button');
+            if (submitButton.disabled) return;
+            
+            const serviceName = document.getElementById('service-name').value.trim();
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+
+            // Debug logging
+            console.log('Adding credential:', {
+                serviceNameLength: serviceName.length,
+                usernameLength: username.length,
+                passwordLength: password.length
+            });
+
+            // Clear previous feedback
+            showFeedback('add-feedback', '', false);
+
+            // Validate inputs
+            if (!serviceName) {
+                console.log('Validation failed: Empty service name');
+                showFeedback('add-feedback', 'Please enter a service name', true);
+                return;
+            }
+            if (!username) {
+                console.log('Validation failed: Empty username');
+                showFeedback('add-feedback', 'Please enter a username', true);
+                return;
+            }
+            if (!password) {
+                console.log('Validation failed: Empty password');
+                showFeedback('add-feedback', 'Please enter a password', true);
+                return;
+            }
+
+            // Disable submit button
+            submitButton.disabled = true;
+            console.log('Submit button disabled');
+
+            try {
+                console.log('Sending request to /add_credential');
+                const requestBody = { service_name: serviceName, username, password };
+                console.log('Request body:', JSON.stringify(requestBody));
+
+                const response = await fetch('/add_credential', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                console.log('Response status:', response.status);
+                console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+
+                const data = await response.json();
+                console.log('Response data:', data);
+
+                if (response.ok) {
+                    console.log('Credential added successfully');
+                    showFeedback('add-feedback', `Credential added successfully for ${data.service_name}!`, false);
+                    document.getElementById('service-name').value = '';
+                    document.getElementById('username').value = '';
+                    document.getElementById('password').value = '';
+                    document.getElementById('password-suggestions').style.display = 'none';
+                    
+                    // Show password strength details
+                    const strengthDetails = document.createElement('div');
+                    strengthDetails.innerHTML = `
+                        <h4>Password Analysis:</h4>
+                        <ul>
+                            ${data.password_strength.feedback.map(f => `<li>${f}</li>`).join('')}
+                        </ul>
+                        ${data.password_strength.patterns.common_words.length > 0 ? 
+                            `<p>Common words found: ${data.password_strength.patterns.common_words.join(', ')}</p>` : ''}
+                        ${data.password_strength.patterns.keyboard_patterns.length > 0 ? 
+                            `<p>Keyboard patterns found: ${data.password_strength.patterns.keyboard_patterns.join(', ')}</p>` : ''}
+                    `;
+                    document.getElementById('add-feedback').appendChild(strengthDetails);
+                    
+                    loadCredentials();
+                } else if (response.status === 409) {
+                    console.log('Service already exists');
+                    showUpdatePopup(data.existing);
+                } else {
+                    console.log('Error response:', data);
+                    let errorMessage = data.error || 'Failed to add credential';
+                    if (data.feedback) {
+                        errorMessage += ':<ul>' + data.feedback.map(f => `<li>${f}</li>`).join('') + '</ul>';
+                        if (data.patterns) {
+                            errorMessage += '<h4>Pattern Analysis:</h4><ul>';
+                            if (data.patterns.common_words.length > 0) {
+                                errorMessage += `<li>Common words found: ${data.patterns.common_words.join(', ')}</li>`;
+                            }
+                            if (data.patterns.keyboard_patterns.length > 0) {
+                                errorMessage += `<li>Keyboard patterns found: ${data.patterns.keyboard_patterns.join(', ')}</li>`;
+                            }
+                            if (data.patterns.repeated_chars.length > 0) {
+                                errorMessage += `<li>Repeated characters: ${data.patterns.repeated_chars.join(', ')}</li>`;
+                            }
+                            if (data.patterns.sequential_numbers.length > 0) {
+                                errorMessage += `<li>Sequential numbers found: ${data.patterns.sequential_numbers.join(', ')}</li>`;
+                            }
+                            errorMessage += '</ul>';
+                        }
+                    }
+                    showFeedback('add-feedback', errorMessage, true);
+                }
+            } catch (error) {
+                console.error('Error in addCredential:', error);
+                showFeedback('add-feedback', 'Error: ' + error.message, true);
+            } finally {
+                // Re-enable submit button
+                submitButton.disabled = false;
+                console.log('Submit button re-enabled');
+            }
+        }
+
+        function showUpdatePopup(existing) {
+            currentCredentialId = existing.id;
+            document.getElementById('current-username').textContent = existing.username;
+            document.getElementById('update-username').value = existing.username;
+            document.getElementById('update-password').value = '';
+            document.getElementById('update-feedback').textContent = '';
+            document.getElementById('overlay').classList.add('active');
+            document.getElementById('update-popup').classList.add('active');
+        }
+
+        function closeUpdatePopup() {
+            document.getElementById('overlay').classList.remove('active');
+            document.getElementById('update-popup').classList.remove('active');
+            currentCredentialId = null;
+        }
+
+        async function updateCredential() {
+            const username = document.getElementById('update-username').value;
+            const password = document.getElementById('update-password').value;
+
+            try {
+                const response = await fetch(`/update_credential/${currentCredentialId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password }),
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showFeedback('update-feedback', 'Credential updated successfully!', false);
+                    setTimeout(() => {
+                        closeUpdatePopup();
+                        loadCredentials(); // Refresh the list
+                    }, 1500);
+                } else {
+                    showFeedback('update-feedback', data.error + (data.feedback ? ': ' + data.feedback.join(', ') : ''), true);
+                }
+            } catch (error) {
+                showFeedback('update-feedback', 'Error: ' + error.message, true);
+            }
+        }
+
+        // Close popup when clicking overlay
+        document.getElementById('overlay').addEventListener('click', closeUpdatePopup);
+
+        async function loadCredentials(searchQuery = '') {
+            try {
+                const response = await fetch(searchQuery ? `/search_credentials?q=${encodeURIComponent(searchQuery)}` : '/get_credentials');
+                const data = await response.json();
+
+                if (response.ok) {
+                    const credentialsList = document.getElementById('credentials-list');
+                    credentialsList.innerHTML = '';
+                    
+                    if ((!data.credentials || data.credentials.length === 0)) {
+                        credentialsList.innerHTML = '<p>No credentials found.</p>';
+                        return;
+                    }
+
+                    data.credentials.forEach(cred => {
+                        const credentialItem = document.createElement('div');
+                        credentialItem.className = 'credential-item';
+                        
+                        // Add relevance score indicator if it exists
+                        const relevanceHtml = cred.relevance_score ? 
+                            `<div class="relevance-score">Match Score: ${Math.round(cred.relevance_score)}%</div>` : '';
+                        
+                        // Ensure credential ID is a valid number
+                        const credId = parseInt(cred.id);
+                        if (isNaN(credId)) {
+                            console.error('Invalid credential ID:', cred.id);
+                            return;
+                        }
+                        
+                        credentialItem.innerHTML = `
+                            <div>
+                                <div class="service-name">${cred.service_name}</div>
+                                <div>Username: ${cred.username}</div>
+                                ${relevanceHtml}
+                                <div class="timestamp">Added: ${new Date(cred.created_at || Date.now()).toLocaleString()}</div>
+                            </div>
+                            <div class="credential-actions">
+                                <button class="action-button" onclick="autofillCredential(${credId})">Autofill</button>
+                                <button class="action-button" onclick="copyPassword(${credId})">Copy Password</button>
+                                <button class="action-button" onclick="sendToDevice(${credId})">Send to Device</button>
+                                <button class="action-button" onclick="toggleEditForm(${credId})">Edit</button>
+                                <button class="action-button delete-button" onclick="deleteCredential(${credId})">Delete</button>
+                            </div>
+                        `;
+
+                        // Add the edit form as a separate div after the credential item
+                        const editForm = document.createElement('div');
+                        editForm.id = `edit-form-${credId}`;
+                        editForm.className = 'edit-form';
+                        editForm.innerHTML = `
+                            <div class="form-group">
+                                <label>New Username:</label>
+                                <input type="text" id="edit-username-${credId}" value="${cred.username}">
+                            </div>
+                            <div class="form-group">
+                                <label>New Password:</label>
+                                <div style="display: flex; align-items: center;">
+                                    <input type="password" id="edit-password-${credId}">
+                                    <button class="generate-btn" onclick="generatePasswordSuggestions('edit', '${credId}')">Generate Strong Password</button>
+                                </div>
+                            </div>
+                            <div id="edit-password-suggestions-${credId}" class="password-suggestions"></div>
+                            <div class="credential-actions">
+                                <button class="action-button" onclick="saveEdit(${credId})">Save</button>
+                                <button class="action-button cancel-button" onclick="toggleEditForm(${credId})">Cancel</button>
+                            </div>
+                        `;
+                        credentialsList.appendChild(credentialItem);
+                        credentialsList.appendChild(editForm);
+                    });
+                } else {
+                    showFeedback('manage-feedback', data.error, true);
+                }
+            } catch (error) {
+                showFeedback('manage-feedback', 'Error: ' + error.message, true);
+            }
+        }
+
+        async function searchCredentials() {
+            const query = document.getElementById('search-input').value;
+            
+            // Clear previous timeout
+            if (searchTimeout) {
+                clearTimeout(searchTimeout);
+            }
+            
+            // Set new timeout
+            searchTimeout = setTimeout(async () => {
+                if (query.length < 2) {
+                    document.getElementById('search-results').innerHTML = '';
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/search_credentials?q=${encodeURIComponent(query)}`);
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        const searchResults = document.getElementById('search-results');
+                        searchResults.innerHTML = '';
+                        
+                        if (data.credentials.length === 0) {
+                            searchResults.innerHTML = '<p>No matching credentials found.</p>';
+                            return;
+                        }
+
+                        data.credentials.forEach(cred => {
+                            // Ensure credential ID is a valid number
+                            const credId = parseInt(cred.id);
+                            if (isNaN(credId)) {
+                                console.error('Invalid credential ID:', cred.id);
+                                return;
+                            }
+                            
+                            const credentialItem = document.createElement('div');
+                            credentialItem.className = 'credential-item';
+                            credentialItem.innerHTML = `
+                                <div>
+                                    <div class="service-name">${cred.service_name}</div>
+                                    <div>Username: ${cred.username}</div>
+                                </div>
+                                <div class="credential-actions">
+                                    <button class="action-button" onclick="autofillCredential(${credId})">Autofill</button>
+                                    <button class="action-button" onclick="copyPassword(${credId})">Copy Password</button>
+                                </div>
+                            `;
+                            searchResults.appendChild(credentialItem);
+                        });
+                    } else {
+                        showFeedback('autofill-feedback', data.error, true);
+                    }
+                } catch (error) {
+                    showFeedback('autofill-feedback', 'Error: ' + error.message, true);
+                }
+            }, 300); // Debounce search for 300ms
+        }
+
+        function showSnackbar(message) {
+            const snackbar = document.getElementById('snackbar');
+            snackbar.textContent = message;
+            snackbar.classList.add('show');
+            
+            // Hide after 3 seconds
+            setTimeout(() => {
+                snackbar.classList.remove('show');
+            }, 3000);
+        }
+
+        async function copyPassword(credentialId) {
+            try {
+                if (!credentialId) {
+                    showSnackbar('Error: Invalid credential ID');
+                    return;
+                }
+
+                const response = await fetch(`/get_password/${credentialId}`);
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    if (data.password) {
+                        // Create a temporary input element
+                        const tempInput = document.createElement('input');
+                        tempInput.value = data.password;
+                        document.body.appendChild(tempInput);
+                        tempInput.select();
+                        
+                        try {
+                            // Try to copy using the Clipboard API
+                            await navigator.clipboard.writeText(data.password);
+                            showSnackbar('Password copied to clipboard!');
+                        } catch (err) {
+                            // Fallback to document.execCommand
+                            try {
+                                document.execCommand('copy');
+                                showSnackbar('Password copied to clipboard!');
+                            } catch (execErr) {
+                                showSnackbar(`${data.message} ${data.password}`);
+                            }
+                        }
+                        
+                        // Clean up
+                        document.body.removeChild(tempInput);
+                    } else {
+                        showSnackbar(data.message);
+                    }
+                } else {
+                    showSnackbar(data.error || 'Failed to copy password');
+                }
+            } catch (error) {
+                console.error('Error copying password:', error);
+                showSnackbar(error.message || 'Error: Could not copy password');
+            }
+        }
+
+        async function deleteCredential(credentialId) {
+            // Ensure credential ID is valid
+            if (!credentialId) {
+                showSnackbar('Error: Invalid credential ID');
+                return;
+            }
+
+            // Ask for confirmation
+            if (!confirm('Are you sure you want to delete this credential? This action cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/delete_credential/${credentialId}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showSnackbar('Credential deleted successfully');
+                    loadCredentials(); // Refresh the credentials list
+                } else {
+                    showSnackbar(data.error || 'Failed to delete credential');
+                }
+            } catch (error) {
+                console.error('Error deleting credential:', error);
+                showSnackbar('Error: ' + error.message);
+            }
+        }
+
+        function autofillCredential(credentialId) {
+            try {
+                // Ensure credential ID is a valid number
+                const credId = parseInt(credentialId);
+                if (isNaN(credId)) {
+                    showSnackbar('Error: Invalid credential ID');
+                    return;
+                }
+
+                const popup = document.getElementById('autofill-popup');
+                const content = document.getElementById('autofill-content');
+                
+                // Show popup with autofill instructions
+                content.innerHTML = `
+                    <p>To autofill the password:</p>
+                    <ol>
+                        <li>Click the "Copy Password" button</li>
+                        <li>Paste the password into the password field</li>
+                    </ol>
+                    <button class="action-button" onclick="copyPassword(${credId})">Copy Password</button>
+                `;
+                
+                popup.classList.add('active');
+            } catch (error) {
+                console.error('Error in autofillCredential:', error);
+                showSnackbar('Error: Could not show autofill popup');
+            }
+        }
+
+        function closeAutofillPopup() {
+            document.getElementById('autofill-popup').classList.remove('active');
+        }
+
+        // Close popup when clicking outside
+        document.addEventListener('click', function(event) {
+            const popup = document.getElementById('autofill-popup');
+            if (!popup.contains(event.target)) {
+                popup.classList.remove('active');
+            }
+        });
+
+        // Load credentials when the page loads
+        document.addEventListener('DOMContentLoaded', loadCredentials);
+
+        async function generatePasswordSuggestions(context, credentialId = null) {
+            const serviceName = context === 'add' ? 
+                document.getElementById('service-name').value :
+                document.querySelector(`#edit-form-${credentialId} .service-name`).textContent;
+            
+            const username = context === 'add' ?
+                document.getElementById('username').value :
+                document.getElementById(`edit-username-${credentialId}`).value;
+            
+            if (!serviceName) {
+                showSnackbar('Please enter a service name first');
+                return;
+            }
+
+            try {
+                const response = await fetch('/generate_password_suggestions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        service_name: serviceName,
+                        username: username,
+                        count: 3
+                    }),
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    const suggestionsContainer = context === 'add' ? 
+                        document.getElementById('password-suggestions') :
+                        document.getElementById(`edit-password-suggestions-${credentialId}`);
+                    
+                    suggestionsContainer.innerHTML = `
+                        <h4>Suggested Passwords:</h4>
+                        ${data.suggestions.map(suggestion => `
+                            <div class="suggestion-item">
+                                <span class="suggestion-password">${suggestion.password}</span>
+                                <button class="use-password-btn" onclick="usePassword('${suggestion.password}', '${context}', '${credentialId || ''}')">Use</button>
+                            </div>
+                        `).join('')}
+                    `;
+                    suggestionsContainer.style.display = 'block';
+                } else {
+                    showSnackbar(data.error || 'Failed to generate password suggestions');
+                }
+            } catch (error) {
+                showSnackbar('Error: ' + error.message);
+            }
+        }
+
+        function usePassword(password, context, credentialId) {
+            if (context === 'add') {
+                document.getElementById('password').value = password;
+                document.getElementById('password-suggestions').style.display = 'none';
+            } else {
+                document.getElementById(`edit-password-${credentialId}`).value = password;
+                document.getElementById(`edit-password-suggestions-${credentialId}`).style.display = 'none';
+            }
+            showSnackbar('Password applied!');
+        }
+
+        function displaySearchResults(credentials) {
+            const searchResultsContainer = document.getElementById('search-results');
+            if (!credentials || credentials.length === 0) {
+                searchResultsContainer.innerHTML = '<p>No matching credentials found.</p>';
+                return;
+            }
+
+            searchResultsContainer.innerHTML = credentials.map(cred => {
+                // Ensure credential ID is a valid number
+                const credId = parseInt(cred.id);
+                if (isNaN(credId)) {
+                    console.error('Invalid credential ID:', cred.id);
+                    return '';
+                }
+                
+                return `
+                    <div class="credential-item">
+                        <div class="credential-info">
+                            <h3>${cred.service_name}</h3>
+                            <p>Username: ${cred.username}</p>
+                        </div>
+                        <div class="credential-actions">
+                            <button class="action-button" onclick="autofillCredential(${credId})">Autofill</button>
+                            <button class="action-button" onclick="copyPassword(${credId})">Copy Password</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function handleServiceInput(event) {
+            const input = event.target;
+            const query = input.value.trim();
+            
+            clearTimeout(suggestionTimeouts.service);
+            
+            if (query.length < 2) {
+                document.getElementById('service-suggestions').style.display = 'none';
+                return;
+            }
+            
+            suggestionTimeouts.service = setTimeout(async () => {
+                try {
+                    const response = await fetch(`/get_suggestions?q=${encodeURIComponent(query)}&field=service`);
+                    const data = await response.json();
+                    
+                    if (data.success && data.suggestions.length > 0) {
+                        const suggestionsContainer = document.getElementById('service-suggestions');
+                        suggestionsContainer.innerHTML = data.suggestions
+                            .map(suggestion => `
+                                <div class="suggestion-item" onclick="useSuggestion('service-name', '${suggestion}')">
+                                    ${highlightMatch(suggestion, query)}
+                                </div>
+                            `)
+                            .join('');
+                        suggestionsContainer.style.display = 'block';
+                    } else {
+                        document.getElementById('service-suggestions').style.display = 'none';
+                    }
+                } catch (error) {
+                    console.error('Error fetching service suggestions:', error);
+                }
+            }, 300);
+        }
+
+        async function handleUsernameInput(event) {
+            const input = event.target;
+            const query = input.value.trim();
+            
+            clearTimeout(suggestionTimeouts.username);
+            
+            if (query.length < 2) {
+                document.getElementById('username-suggestions').style.display = 'none';
+                return;
+            }
+            
+            suggestionTimeouts.username = setTimeout(async () => {
+                try {
+                    const response = await fetch(`/get_suggestions?q=${encodeURIComponent(query)}&field=username`);
+                    const data = await response.json();
+                    
+                    if (data.success && data.suggestions.length > 0) {
+                        const suggestionsContainer = document.getElementById('username-suggestions');
+                        suggestionsContainer.innerHTML = data.suggestions
+                            .map(suggestion => `
+                                <div class="suggestion-item" onclick="useSuggestion('username', '${suggestion}')">
+                                    ${highlightMatch(suggestion, query)}
+                                </div>
+                            `)
+                            .join('');
+                        suggestionsContainer.style.display = 'block';
+                    } else {
+                        document.getElementById('username-suggestions').style.display = 'none';
+                    }
+                } catch (error) {
+                    console.error('Error fetching username suggestions:', error);
+                }
+            }, 300);
+        }
+
+        function highlightMatch(text, query) {
+            const regex = new RegExp(`(${query})`, 'gi');
+            return text.replace(regex, '<strong>$1</strong>');
+        }
+
+        function useSuggestion(inputId, value) {
+            document.getElementById(inputId).value = value;
+            document.getElementById(`${inputId.split('-')[0]}-suggestions`).style.display = 'none';
+        }
+
+        function checkPasswordStrength(event) {
+            const password = event.target.value;
+            const requirements = [
+                { regex: /.{8,}/, text: "At least 8 characters" },
+                { regex: /[A-Z]/, text: "Contains uppercase letter" },
+                { regex: /[a-z]/, text: "Contains lowercase letter" },
+                { regex: /[0-9]/, text: "Contains number" },
+                { regex: /[^A-Za-z0-9]/, text: "Contains special character" }
+            ];
+            
+            let strength = 0;
+            const requirementsDiv = document.getElementById('password-requirements');
+            requirementsDiv.innerHTML = requirements
+                .map(req => {
+                    const met = req.regex.test(password);
+                    if (met) strength++;
+                    return `
+                        <div class="${met ? 'requirement-met' : 'requirement-unmet'}">
+                            ${met ? '✓' : '✗'} ${req.text}
+                        </div>
+                    `;
+                })
+                .join('');
+            
+            const strengthMeter = document.getElementById('strength-meter');
+            const strengthPercentage = (strength / requirements.length) * 100;
+            strengthMeter.style.width = `${strengthPercentage}%`;
+            strengthMeter.className = 
+                strengthPercentage <= 40 ? 'strength-weak' :
+                strengthPercentage <= 80 ? 'strength-medium' :
+                'strength-strong';
+        }
+
+        // Close suggestions when clicking outside
+        document.addEventListener('click', function(event) {
+            if (!event.target.closest('.input-with-suggestions')) {
+                document.querySelectorAll('.suggestions-list').forEach(list => {
+                    list.style.display = 'none';
+                });
+            }
+        });
+
+        // Handle keyboard navigation for suggestions
+        document.addEventListener('keydown', function(event) {
+            const activeSuggestions = document.querySelector('.suggestions-list[style="display: block;"]');
+            if (!activeSuggestions) return;
+            
+            const items = activeSuggestions.querySelectorAll('.suggestion-item');
+            const selectedItem = activeSuggestions.querySelector('.selected');
+            let selectedIndex = Array.from(items).indexOf(selectedItem);
+            
+            switch (event.key) {
+                case 'ArrowDown':
+                    event.preventDefault();
+                    selectedIndex = (selectedIndex + 1) % items.length;
+                    break;
+                case 'ArrowUp':
+                    event.preventDefault();
+                    selectedIndex = (selectedIndex - 1 + items.length) % items.length;
+                    break;
+                case 'Enter':
+                    if (selectedItem) {
+                        event.preventDefault();
+                        selectedItem.click();
+                    }
+                    return;
+                case 'Escape':
+                    activeSuggestions.style.display = 'none';
+                    return;
+                default:
+                    return;
+            }
+            
+            items.forEach(item => item.classList.remove('selected'));
+            items[selectedIndex].classList.add('selected');
+            items[selectedIndex].scrollIntoView({ block: 'nearest' });
+        });
+
+        function toggleEditForm(credentialId) {
+            const editForm = document.getElementById(`edit-form-${credentialId}`);
+            if (editForm.classList.contains('active')) {
+                editForm.classList.remove('active');
+            } else {
+                // Close any other open edit forms
+                document.querySelectorAll('.edit-form.active').forEach(form => {
+                    form.classList.remove('active');
+                });
+                editForm.classList.add('active');
+                // Focus the username field
+                document.getElementById(`edit-username-${credentialId}`).focus();
+            }
+        }
+
+        async function saveEdit(credentialId) {
+            const username = document.getElementById(`edit-username-${credentialId}`).value;
+            const password = document.getElementById(`edit-password-${credentialId}`).value;
+
+            try {
+                const response = await fetch(`/update_credential/${credentialId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password }),
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSnackbar('Credential updated successfully!');
+                    toggleEditForm(credentialId);
+                    loadCredentials(); // Refresh the list
+                } else {
+                    showSnackbar(data.error + (data.feedback ? ': ' + data.feedback.join(', ') : ''));
+                }
+            } catch (error) {
+                showSnackbar('Error: ' + error.message);
+            }
+        }
+
+        async function sendToDevice(credentialId) {
+            try {
+                const response = await fetch(`/send_to_device/${credentialId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    showSnackbar('Password sent to device successfully!');
+                } else {
+                    showSnackbar(data.error || 'Failed to send password to device');
+                }
+            } catch (error) {
+                console.error('Error sending to device:', error);
+                showSnackbar('Error: ' + error.message);
+            }
+        }
+    </script>
+</body>
+</html> 

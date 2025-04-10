@@ -1,0 +1,9 @@
+{
+    "Accounts": [
+        {
+            "Name": "Alex",
+            "LoginId": "alex123",
+            "Password": "pass123"
+        }
+    ]
+}
