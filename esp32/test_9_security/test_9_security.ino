@@ -8,10 +8,12 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <BLESecurity.h>
+
 extern "C" {
   #include "sqlite3.h"
 }
 
+// Custom service and characteristic UUIDs
 #define SERVICE_UUID              "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID       "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_RX_UUID    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -25,8 +27,23 @@ sqlite3 *db;
 sqlite3_stmt *res;
 char *zErrMsg = 0;
 int rc;
+BLEServer* pServer = NULL;
+BLEService* pService = NULL;
 BLECharacteristic *pCharacteristic;
 BLECharacteristic *pNotifyCharacteristic;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+// Store bonded device address
+String bondedDeviceAddress = "";
+
+// Helper function to convert Bluetooth address to string
+String btAddressToString(esp_bd_addr_t addr) {
+  char str[18];
+  sprintf(str, "%02X:%02X:%02X:%02X:%02X:%02X",
+          addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+  return String(str);
+}
 
 void displayMessage(const String &msg) {
   display.clearDisplay();
@@ -37,6 +54,12 @@ void displayMessage(const String &msg) {
 }
 
 void handleCommand(String cmdLine) {
+  // Only process commands if device is bonded
+  if (bondedDeviceAddress.length() == 0) {
+    displayMessage("Not bonded!");
+    return;
+  }
+
   displayMessage("Processing...");
   std::vector<String> tokens;
   int start = 0;
@@ -106,30 +129,48 @@ class CommandCallback : public BLECharacteristicCallbacks {
 
 class MySecurity : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override {
-    displayMessage("Passkey Req: 123456");
-    return 123456; // Return your static key if used
+    displayMessage("Passkey: 123456");
+    return 123456;
   }
 
   void onPassKeyNotify(uint32_t pass_key) override {
-    displayMessage("Passkey Notify: " + String(pass_key));
+    displayMessage("Passkey: " + String(pass_key));
   }
 
   bool onConfirmPIN(uint32_t pass_key) override {
-    displayMessage("Confirm PIN: " + String(pass_key));
-    return true; // Auto-accept
+    displayMessage("Confirm: " + String(pass_key));
+    return true;
   }
 
   bool onSecurityRequest() override {
-    displayMessage("Security Request");
-    return true; // Accept security request
+    displayMessage("Security Req");
+    return true;
   }
 
   void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
     if (cmpl.success) {
-      displayMessage("Pairing Successful!");
+      bondedDeviceAddress = btAddressToString(cmpl.bd_addr);
+      displayMessage("Paired: " + bondedDeviceAddress);
     } else {
-      displayMessage("Pairing Failed!");
+      displayMessage("Pair Failed!");
     }
+  }
+};
+
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    deviceConnected = true;
+    displayMessage("Connected");
+    esp_bd_addr_t addr;
+    memcpy(addr, pServer->getAddress().getNative(), sizeof(esp_bd_addr_t));
+    bondedDeviceAddress = btAddressToString(addr);
+  }
+
+  void onDisconnect(BLEServer* pServer) override {
+    deviceConnected = false;
+    displayMessage("Disconnected");
+    // Start advertising again
+    BLEDevice::startAdvertising();
   }
 };
 
@@ -143,14 +184,12 @@ void setup() {
   display.display();
   delay(1000);
 
-  // Initialize SD card
   if (!SD.begin(SD_CS)) {
     displayMessage("SD init failed!");
     while (1);
   }
   displayMessage("SD init OK");
 
-  // Initialize SQLite
   sqlite3_initialize();
   rc = sqlite3_open("/sd/credentials.db", &db);
   if (rc != SQLITE_OK) {
@@ -169,20 +208,24 @@ void setup() {
   }
   displayMessage("Table OK");
 
-  // Setup BLE
+  // Initialize BLE
   BLEDevice::init("ESP32-GATT-Manager");
   BLEDevice::setSecurityCallbacks(new MySecurity());
 
-  // Configure BLE security
+  // Configure security
   BLESecurity *pSecurity = new BLESecurity();
-  pSecurity->setAuthenticationMode(ESP_LE_AUTH_BOND); // Enable bonding
-  pSecurity->setCapability(ESP_IO_CAP_OUT);          // Display-only capability
+  pSecurity->setAuthenticationMode(ESP_LE_AUTH_BOND);
+  pSecurity->setCapability(ESP_IO_CAP_OUT);
   pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
-  BLEServer *pServer = BLEDevice::createServer();
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
 
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+  // Create the BLE Service
+  pService = pServer->createService(BLEUUID(SERVICE_UUID), 30);
 
+  // Create BLE Characteristics
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_WRITE
@@ -194,14 +237,29 @@ void setup() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
 
+  // Start the service
   pService->start();
+
+  // Start advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->start();
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
 
   displayMessage("BLE started");
 }
 
 void loop() {
-  // BLE logic handled in callbacks
-}
+  // Disconnecting
+  if (!deviceConnected && oldDeviceConnected) {
+    delay(500); // Give the bluetooth stack the chance to get things ready
+    pServer->startAdvertising(); // Restart advertising
+    oldDeviceConnected = deviceConnected;
+  }
+  // Connecting
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+  }
+} 
