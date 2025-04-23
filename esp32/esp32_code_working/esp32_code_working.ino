@@ -225,11 +225,18 @@ void setup() {
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  pCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE
+  // Create rxCharacteristic
+  BLECharacteristic *rxCharacteristic = pService->createCharacteristic(
+    "6E400002-B5A3-F393-E0A9-E50E24DCCA9E",
+    BLECharacteristic::PROPERTY_WRITE
   );
-  pCharacteristic->setCallbacks(new CommandCallback());
+  rxCharacteristic->setCallbacks(new CommandCallback());
+
+  // Create txCharacteristic
+  BLECharacteristic *txCharacteristic = pService->createCharacteristic(
+    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E",
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
 
   pService->start();
 
