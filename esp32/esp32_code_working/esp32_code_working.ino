@@ -169,13 +169,8 @@ class ServerCallbacks : public BLEServerCallbacks {
 };
 
 void sendNotification(String data) {
-  const int chunkSize = 20; // Adjust based on MTU size
-  for (size_t i = 0; i < data.length(); i += chunkSize) {
-    String chunk = data.substring(i, i + chunkSize);
-    pCharacteristic->setValue(chunk.c_str());
-    pCharacteristic->notify();
-    delay(10); // Small delay to ensure the client processes the notification
-  }
+  pCharacteristic->setValue(data.c_str()); // Set the full data as the characteristic value
+  pCharacteristic->notify();              // Notify the client
 }
 
 void setup() {

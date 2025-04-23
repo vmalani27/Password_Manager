@@ -8,6 +8,8 @@ from nlp_analyzer import NLPPasswordAnalyzer
 import pyperclip  # For clipboard operations
 # from bleak import BleakClient, BleakScanner
 import asyncio
+import requests
+from requests.exceptions import RequestException
 
 app = Flask(__name__)
 bcrypt = Bcrypt(app)
@@ -22,6 +24,14 @@ nlp_analyzer = NLPPasswordAnalyzer()
 # BLE Constants
 ESP32_SERVICE_UUID = "0000180F-0000-1000-8000-00805F9B34FB"  # Replace with your ESP32's service UUID
 ESP32_CHAR_UUID = "00002A19-0000-1000-8000-00805F9B34FB"    # Replace with your ESP32's characteristic UUID
+
+# ESP32 Integration
+ESP32_BASE_URL = "http://192.168.4.1"  # Default ESP32 AP IP address
+ESP32_ENDPOINTS = {
+    'status': '/api/status',
+    'receive_password': '/api/receive_password',
+    'credentials': '/api/credentials'
+}
 
 def is_logged_in():
     return session.get('logged_in', False)
@@ -539,6 +549,70 @@ def send_to_device(credential_id):
             'success': False,
             'error': 'An unexpected error occurred'
         }), 500
+
+def check_esp32_connection():
+    try:
+        response = requests.get(f"{ESP32_BASE_URL}{ESP32_ENDPOINTS['status']}", timeout=5)
+        return response.status_code == 200
+    except RequestException:
+        return False
+
+@app.route('/esp32/status')
+@require_login
+def esp32_status():
+    try:
+        response = requests.get(f"{ESP32_BASE_URL}{ESP32_ENDPOINTS['status']}", timeout=5)
+        return jsonify(response.json())
+    except RequestException as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/esp32/send_password/<int:credential_id>', methods=['POST'])
+@require_login
+def send_password_to_esp32(credential_id):
+    try:
+        # Get credential from database
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT service_name, username, password FROM credentials WHERE id = ?', (credential_id,))
+        result = cursor.fetchone()
+        conn.close()
+
+        if not result:
+            return jsonify({'error': 'Credential not found'}), 404
+
+        service_name, username, password = result
+
+        # Send to ESP32
+        data = {
+            'site': service_name,
+            'username': username,
+            'password': password
+        }
+        
+        response = requests.post(
+            f"{ESP32_BASE_URL}{ESP32_ENDPOINTS['receive_password']}", 
+            json=data,
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            return jsonify({'message': 'Password sent to ESP32 successfully'})
+        else:
+            return jsonify({'error': 'Failed to send password to ESP32'}), 500
+
+    except RequestException as e:
+        return jsonify({'error': str(e)}), 500
+    except sqlite3.Error as e:
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
+
+@app.route('/esp32/credentials')
+@require_login
+def get_esp32_credentials():
+    try:
+        response = requests.get(f"{ESP32_BASE_URL}{ESP32_ENDPOINTS['credentials']}", timeout=5)
+        return jsonify(response.json())
+    except RequestException as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     init_db()

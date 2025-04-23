@@ -1,143 +1,243 @@
 #include <Arduino.h>
-#include <SPI.h>
-#include <SD.h>
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <SPIFFS.h>
 
-extern "C" {
-  #include "sqlite3.h"
+#define MAX_CREDENTIALS 50
+#define CREDENTIALS_FILE "/credentials.json"
+
+// Wi-Fi credentials - these should match your Flask app's network
+const char* ssid = "ESP32-Network";
+const char* password = "12345678";
+
+// Create an AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+// Function to send JSON response
+void sendJsonResponse(AsyncWebServerRequest *request, int statusCode, const char* message, bool success = true) {
+  StaticJsonDocument<200> doc;
+  doc["success"] = success;
+  doc["message"] = message;
+  
+  String response;
+  serializeJson(doc, response);
+  request->send(statusCode, "application/json", response);
 }
 
-#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define SD_CS 5
-
-sqlite3 *db;
-sqlite3_stmt *res;
-char *zErrMsg = 0;
-int rc;
-
-BLECharacteristic *pCharacteristic;
-
-void handleCommand(String cmdLine) {
-  Serial.println("Processing command: " + cmdLine);
-
-  // Tokenize
-  std::vector<String> tokens;
-  char *token = strtok((char*)cmdLine.c_str(), " ");
-  while (token != NULL) {
-    tokens.push_back(String(token));
-    token = strtok(NULL, " ");
-  }
-
-  if (tokens.size() == 0) return;
-
-  String cmd = tokens[0];
-
-  if (cmd == "add" && tokens.size() == 4) {
-    String site = tokens[1], user = tokens[2], pass = tokens[3];
-    String sql = "INSERT INTO credentials (site, username, password) VALUES ('" +
-                  site + "', '" + user + "', '" + pass + "');";
-    rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    Serial.println(rc == SQLITE_OK ? "Added." : zErrMsg);
-  }
-
-  else if (cmd == "get" && tokens.size() == 3) {
-    String site = tokens[1], user = tokens[2];
-    String sql = "SELECT password FROM credentials WHERE site='" + site +
-                 "' AND username='" + user + "';";
-    rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &res, 0);
-    if (rc == SQLITE_OK && sqlite3_step(res) == SQLITE_ROW) {
-      Serial.println("Password: " + String((const char*)sqlite3_column_text(res, 0)));
-    } else Serial.println("Not found.");
-    sqlite3_finalize(res);
-  }
-
-  else if (cmd == "update" && tokens.size() == 4) {
-    String site = tokens[1], user = tokens[2], pass = tokens[3];
-    String sql = "UPDATE credentials SET password='" + pass +
-                 "' WHERE site='" + site + "' AND username='" + user + "';";
-    rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    Serial.println(rc == SQLITE_OK ? "Updated." : zErrMsg);
-  }
-
-  else if (cmd == "delete" && tokens.size() == 3) {
-    String site = tokens[1], user = tokens[2];
-    String sql = "DELETE FROM credentials WHERE site='" + site +
-                 "' AND username='" + user + "';";
-    rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    Serial.println(rc == SQLITE_OK ? "Deleted." : zErrMsg);
-  }
-
-  else if (cmd == "list") {
-    String sql = "SELECT site, username FROM credentials;";
-    rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &res, 0);
-    while (sqlite3_step(res) == SQLITE_ROW) {
-      Serial.print("Site: ");
-      Serial.print((const char*)sqlite3_column_text(res, 0));
-      Serial.print(" | User: ");
-      Serial.println((const char*)sqlite3_column_text(res, 1));
+// Function to load credentials from SPIFFS
+bool loadCredentials(JsonDocument& doc) {
+  if (!SPIFFS.exists(CREDENTIALS_FILE)) {
+    // Create empty credentials file if it doesn't exist
+    File file = SPIFFS.open(CREDENTIALS_FILE, "w");
+    if (!file) {
+      Serial.println("Failed to create credentials file");
+      return false;
     }
-    sqlite3_finalize(res);
+    file.print("{\"credentials\":[]}");
+    file.close();
   }
-
-  else {
-    Serial.println("Invalid command or wrong argument count.");
+  
+  File file = SPIFFS.open(CREDENTIALS_FILE, "r");
+  if (!file) {
+    Serial.println("Failed to open credentials file");
+    return false;
   }
+  
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  
+  if (error) {
+    Serial.println("Failed to parse credentials file");
+    return false;
+  }
+  
+  return true;
 }
 
-class CommandCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pChar) override {
-    String value = String(pChar->getValue().c_str());
-    if (!value.isEmpty()) {
-      handleCommand(String(value.c_str()));
+// Function to save credentials to SPIFFS
+bool saveCredentials(JsonDocument& doc) {
+  File file = SPIFFS.open(CREDENTIALS_FILE, "w");
+  if (!file) {
+    Serial.println("Failed to open credentials file for writing");
+    return false;
+  }
+  
+  if (serializeJson(doc, file) == 0) {
+    Serial.println("Failed to write to credentials file");
+    file.close();
+    return false;
+  }
+  
+  file.close();
+  return true;
+}
+
+// Function to add or update a credential
+bool addCredential(const char* site, const char* username, const char* password) {
+  StaticJsonDocument<4096> doc;
+  if (!loadCredentials(doc)) {
+    return false;
+  }
+  
+  JsonArray credentials = doc["credentials"];
+  bool found = false;
+  
+  // Check if credential already exists
+  for (JsonObject credential : credentials) {
+    if (credential["site"] == site && credential["username"] == username) {
+      credential["password"] = password;
+      found = true;
+      break;
     }
   }
-};
+  
+  // Add new credential if not found
+  if (!found) {
+    JsonObject newCredential = credentials.createNestedObject();
+    newCredential["site"] = site;
+    newCredential["username"] = username;
+    newCredential["password"] = password;
+  }
+  
+  return saveCredentials(doc);
+}
+
+// Function to get a credential
+bool getCredential(const char* site, const char* username, char* password, size_t maxLen) {
+  StaticJsonDocument<4096> doc;
+  if (!loadCredentials(doc)) {
+    return false;
+  }
+  
+  JsonArray credentials = doc["credentials"];
+  
+  for (JsonObject credential : credentials) {
+    if (credential["site"] == site && credential["username"] == username) {
+      strlcpy(password, credential["password"] | "", maxLen);
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// Function to delete a credential
+bool deleteCredential(const char* site, const char* username) {
+  StaticJsonDocument<4096> doc;
+  if (!loadCredentials(doc)) {
+    return false;
+  }
+  
+  JsonArray credentials = doc["credentials"];
+  bool found = false;
+  
+  // Create a new array without the credential to delete
+  JsonArray newCredentials = doc.to<JsonArray>();
+  newCredentials.clear();
+  
+  for (JsonObject credential : credentials) {
+    if (credential["site"] == site && credential["username"] == username) {
+      found = true;
+      continue;
+    }
+    
+    JsonObject newCredential = newCredentials.createNestedObject();
+    newCredential["site"] = credential["site"];
+    newCredential["username"] = credential["username"];
+    newCredential["password"] = credential["password"];
+  }
+  
+  if (found) {
+    doc["credentials"] = newCredentials;
+    return saveCredentials(doc);
+  }
+  
+  return false;
+}
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-
-  if (!SD.begin(SD_CS)) {
-    Serial.println("SD card mount failed.");
+  delay(1000); // Give time for serial to initialize
+  
+  Serial.println("Starting ESP32...");
+  
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS initialization failed");
     return;
   }
+  Serial.println("SPIFFS initialized successfully");
+  
+  // Start Wi-Fi in Access Point mode
+  WiFi.softAP(ssid, password);
+  Serial.println("Wi-Fi Access Point started");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
 
-  sqlite3_initialize();
+  // Define a simple web server route
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "ESP32 is running!");
+  });
+  
+  // Define API endpoints
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "ESP32 is online");
+  });
 
-  rc = sqlite3_open("/sd/credentials.db", &db);
-  if (rc) {
-    Serial.print("Can't open DB: ");
-    Serial.println(sqlite3_errmsg(db));
-    return;
-  }
+  // Endpoint to receive password from Flask app
+  server.on("/api/receive_password", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      StaticJsonDocument<512> doc;
+      DeserializationError error = deserializeJson(doc, (char*)data);
+      
+      if (error) {
+        sendJsonResponse(request, 400, "Invalid JSON data", false);
+        return;
+      }
 
-  const char *sql = "CREATE TABLE IF NOT EXISTS credentials ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                    "site TEXT, username TEXT, password TEXT);";
-  sqlite3_exec(db, sql, 0, 0, &zErrMsg);
+      const char* site = doc["site"];
+      const char* username = doc["username"];
+      const char* password = doc["password"];
 
-  BLEDevice::init("ESP32-GATT-Manager");
-  BLEServer *pServer = BLEDevice::createServer();
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+      if (!site || !username || !password) {
+        sendJsonResponse(request, 400, "Missing required fields", false);
+        return;
+      }
 
-  pCharacteristic = pService->createCharacteristic(
-    CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  pCharacteristic->setCallbacks(new CommandCallback());
+      if (addCredential(site, username, password)) {
+        sendJsonResponse(request, 200, "Password received and stored successfully");
+      } else {
+        sendJsonResponse(request, 500, "Failed to store credential", false);
+      }
+  });
 
-  pService->start();
+  // Endpoint to get stored credentials
+  server.on("/api/credentials", HTTP_GET, [](AsyncWebServerRequest *request) {
+    StaticJsonDocument<4096> doc;
+    if (!loadCredentials(doc)) {
+      sendJsonResponse(request, 500, "Failed to load credentials", false);
+      return;
+    }
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
 
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->start();
-
-  Serial.println("BLE GATT running. Waiting for command...");
+  // Start the server
+  server.begin();
+  Serial.println("HTTP server started");
 }
 
 void loop() {
-  // Main logic handled in callbacks
+  // Print memory info every 5 seconds
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 5000) {
+    lastPrint = millis();
+    Serial.printf("Free heap: %d, Largest block: %d\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  }
+  
+  delay(100);
 }
