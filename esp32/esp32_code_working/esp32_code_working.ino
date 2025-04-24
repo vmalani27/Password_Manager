@@ -6,7 +6,6 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 #include <Wire.h>
-#include <AdFLUTTafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
 // Display configuration
@@ -59,7 +58,7 @@ void handleCommand(String cmdLine) {
     String sql = "INSERT INTO credentials (site, username, password) VALUES ('" +
                   site + "', '" + user + "', '" + pass + "');";
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    response = rc == SQLITE_OK ? "Added." : zErrMsg;
+    response = rc == SQLITE_OK ? "Added successfully" : String("Error: ") + zErrMsg;
     Serial.println(response);
     display.clearDisplay();
     display.println(response);
@@ -73,17 +72,15 @@ void handleCommand(String cmdLine) {
                  "' AND username='" + user + "';";
     rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &res, 0);
     if (rc == SQLITE_OK && sqlite3_step(res) == SQLITE_ROW) {
-      String password = "Password: " + String((const char*)sqlite3_column_text(res, 0));
-      Serial.println(password);
-      display.clearDisplay();
-      display.println(password);
-      display.display();
+      response = "Password: " + String((const char*)sqlite3_column_text(res, 0));
     } else {
-      Serial.println("Not found.");
-      display.clearDisplay();
-      display.println("Not found.");
-      display.display();
+      response = "Entry not found";
     }
+    Serial.println(response);
+    display.clearDisplay();
+    display.println(response);
+    display.display();
+    sendNotification(response);
     sqlite3_finalize(res);
   }
 
@@ -92,11 +89,12 @@ void handleCommand(String cmdLine) {
     String sql = "UPDATE credentials SET password='" + pass +
                  "' WHERE site='" + site + "' AND username='" + user + "';";
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    String result = rc == SQLITE_OK ? "Updated." : zErrMsg;
-    Serial.println(result);
+    response = rc == SQLITE_OK ? "Updated successfully" : String("Error: ") + zErrMsg;
+    Serial.println(response);
     display.clearDisplay();
-    display.println(result);
+    display.println(response);
     display.display();
+    sendNotification(response);
   }
 
   else if (cmd == "delete" && tokens.size() == 3) {
@@ -104,35 +102,33 @@ void handleCommand(String cmdLine) {
     String sql = "DELETE FROM credentials WHERE site='" + site +
                  "' AND username='" + user + "';";
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    String result = rc == SQLITE_OK ? "Deleted." : zErrMsg;
-    Serial.println(result);
+    response = rc == SQLITE_OK ? "Deleted successfully" : String("Error: ") + zErrMsg;
+    Serial.println(response);
     display.clearDisplay();
-    display.println(result);
+    display.println(response);
     display.display();
+    sendNotification(response);
   }
 
   else if (cmd == "list") {
     String sql = "SELECT site, username FROM credentials;";
     rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &res, 0);
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println("Listing:");
+    response = "Listing credentials:\n";
     while (sqlite3_step(res) == SQLITE_ROW) {
       String site = String((const char*)sqlite3_column_text(res, 0));
       String user = String((const char*)sqlite3_column_text(res, 1));
-      Serial.print("Site: ");
-      Serial.print(site);
-      Serial.print(" | User: ");
-      Serial.println(user);
-      display.println("Site: " + site);
-      display.println("User: " + user);
+      response += "Site: " + site + " | User: " + user + "\n";
     }
+    Serial.println(response);
+    display.clearDisplay();
+    display.println(response);
     display.display();
+    sendNotification(response);
     sqlite3_finalize(res);
   }
 
   else {
-    response = "Invalid command or wrong argument count.";
+    response = "Invalid command or wrong argument count";
     Serial.println(response);
     display.clearDisplay();
     display.println("Invalid command.");
@@ -174,9 +170,23 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
+class NotificationCallbacks : public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic *pChar) override {
+    // The value is already set by sendNotification, no need to set it again
+    pChar->notify();
+  }
+};
+
 void sendNotification(String data) {
-  pCharacteristic->setValue(data.c_str()); // Set the full data as the characteristic value
-  pCharacteristic->notify();              // Notify the client
+  if (pCharacteristic != nullptr) {
+    // Update the characteristic value
+    pCharacteristic->setValue((uint8_t*)data.c_str(), data.length());
+    
+    // Send notification
+    pCharacteristic->notify();
+    
+    delay(10); // Give some time for the notification to be sent
+  }
 }
 
 void setup() {
@@ -236,11 +246,18 @@ void setup() {
   // Create txCharacteristic for notifications
   pCharacteristic = pService->createCharacteristic(
     NOTIFICATION_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_NOTIFY
+    BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
   );
+  
+  // Add callbacks for the notification characteristic
+  pCharacteristic->setCallbacks(new NotificationCallbacks());
   
   // Add a descriptor for notifications
   pCharacteristic->addDescriptor(new BLE2902());
+  
+  // Set initial value
+  pCharacteristic->setValue("Ready");
+  pCharacteristic->notify();
 
   pService->start();
 
