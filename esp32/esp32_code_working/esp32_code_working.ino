@@ -4,8 +4,9 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <BLE2902.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
+#include <AdFLUTTafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
 // Display configuration
@@ -20,6 +21,7 @@ extern "C" {
 
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NOTIFICATION_CHARACTERISTIC_UUID "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 #define SD_CS 5
 
 sqlite3 *db;
@@ -50,17 +52,19 @@ void handleCommand(String cmdLine) {
   if (tokens.size() == 0) return;
 
   String cmd = tokens[0];
+  String response;
 
   if (cmd == "add" && tokens.size() == 4) {
     String site = tokens[1], user = tokens[2], pass = tokens[3];
     String sql = "INSERT INTO credentials (site, username, password) VALUES ('" +
                   site + "', '" + user + "', '" + pass + "');";
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
-    String result = rc == SQLITE_OK ? "Added." : zErrMsg;
-    Serial.println(result);
+    response = rc == SQLITE_OK ? "Added." : zErrMsg;
+    Serial.println(response);
     display.clearDisplay();
-    display.println(result);
+    display.println(response);
     display.display();
+    sendNotification(response);
   }
 
   else if (cmd == "get" && tokens.size() == 3) {
@@ -128,10 +132,12 @@ void handleCommand(String cmdLine) {
   }
 
   else {
-    Serial.println("Invalid command or wrong argument count.");
+    response = "Invalid command or wrong argument count.";
+    Serial.println(response);
     display.clearDisplay();
     display.println("Invalid command.");
     display.display();
+    sendNotification(response);
   }
 }
 
@@ -222,16 +228,19 @@ void setup() {
 
   // Create rxCharacteristic
   BLECharacteristic *rxCharacteristic = pService->createCharacteristic(
-    "6E400002-B5A3-F393-E0A9-E50E24DCCA9E",
+    CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_WRITE
   );
   rxCharacteristic->setCallbacks(new CommandCallback());
 
-  // Create txCharacteristic
-  BLECharacteristic *txCharacteristic = pService->createCharacteristic(
-    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E",
+  // Create txCharacteristic for notifications
+  pCharacteristic = pService->createCharacteristic(
+    NOTIFICATION_CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
+  
+  // Add a descriptor for notifications
+  pCharacteristic->addDescriptor(new BLE2902());
 
   pService->start();
 
