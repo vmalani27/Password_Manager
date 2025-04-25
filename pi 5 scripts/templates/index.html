@@ -355,13 +355,61 @@
                 width: 100%;
             }
         }
+        .status-section {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f5f5f5;
+            border-radius: 5px;
+        }
+        .ble-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        #bleStatus {
+            padding: 5px 10px;
+            border-radius: 3px;
+            background-color: #e0e0e0;
+            font-size: 14px;
+        }
+        #bleStatus.connected {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .notification-area {
+            min-height: 20px;
+            color: #666;
+            font-size: 14px;
+        }
+        .action-button {
+            padding: 8px 16px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        .action-button:hover {
+            background-color: #1976D2;
+        }
+        .action-button:disabled {
+            background-color: #BDBDBD;
+            cursor: not-allowed;
+        }
     </style>
+    <script src="{{ url_for('static', filename='js/ble_manager.js') }}"></script>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>Password Manager</h1>
-            <a href="{{ url_for('logout') }}" class="logout-button">Logout</a>
+            <div class="header-actions">
+                <a href="{{ url_for('devices_page') }}" class="action-button">Device Scanner</a>
+                <a href="{{ url_for('logout') }}" class="logout-button">Logout</a>
+            </div>
         </div>
         
         <div class="tabs">
@@ -463,11 +511,31 @@
 
     <div id="snackbar" class="snackbar"></div>
 
+    <div class="status-section">
+        <div class="ble-controls">
+            <div id="bleStatus">Disconnected</div>
+            <button class="action-button" onclick="connectBLE()">Connect</button>
+            <button class="action-button" onclick="disconnectBLE()">Disconnect</button>
+        </div>
+        <div class="notification-area"></div>
+    </div>
+
     <script>
         let currentTab = 'add';
         let searchTimeout = null;
         let currentCredentialId = null;
         let suggestionTimeouts = {};
+        let bleDevice = null;
+        let bleServer = null;
+        let rxCharacteristic = null;
+        let txCharacteristic = null;
+
+        const SERVICE_UUID = "7E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+        const RX_CHARACTERISTIC_UUID = "7E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+        const TX_CHARACTERISTIC_UUID = "7E400003-B5A3-F393-E0A9-E50E24DCCA9E";
+
+        // BLE Manager instance
+        let bleManager = new BLEManager();
 
         function showTab(tabName) {
             // Hide all tab contents first
@@ -1242,25 +1310,90 @@
             }
         }
 
+        // Initialize BLE functionality
+        function initBLE() {
+            bleManager = new BLEManager();
+            
+            // Set up notification callback
+            bleManager.setNotificationCallback((message) => {
+                document.getElementById('notificationArea').textContent = message;
+            });
+
+            // Connect button handler
+            document.getElementById('bleConnectBtn').addEventListener('click', async () => {
+                try {
+                    await bleManager.connect();
+                    document.getElementById('bleStatus').textContent = 'Connected';
+                    document.getElementById('bleStatus').style.color = 'green';
+                    document.getElementById('bleConnectBtn').style.display = 'none';
+                    document.getElementById('bleDisconnectBtn').style.display = 'inline-block';
+                    showSnackbar('Connected to ESP32 successfully!');
+                } catch (error) {
+                    document.getElementById('bleStatus').textContent = 'Connection failed: ' + error.message;
+                    document.getElementById('bleStatus').style.color = 'red';
+                    showSnackbar('Failed to connect: ' + error.message);
+                }
+            });
+
+            // Disconnect button handler
+            document.getElementById('bleDisconnectBtn').addEventListener('click', () => {
+                bleManager.disconnect();
+                document.getElementById('bleStatus').textContent = 'Not Connected';
+                document.getElementById('bleStatus').style.color = 'black';
+                document.getElementById('bleConnectBtn').style.display = 'inline-block';
+                document.getElementById('bleDisconnectBtn').style.display = 'none';
+                showSnackbar('Disconnected from ESP32');
+            });
+        }
+
+        // Update sendToDevice function to use BLE Manager
         async function sendToDevice(credentialId) {
+            if (!bleManager.isConnected) {
+                showSnackbar('Please connect to ESP32 first');
+                return;
+            }
+
             try {
-                const response = await fetch(`/send_to_device/${credentialId}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
-                
+                const response = await fetch(`/get_password/${credentialId}`);
                 const data = await response.json();
                 
                 if (response.ok && data.success) {
+                    await bleManager.sendCommand(`type ${data.password}`);
                     showSnackbar('Password sent to device successfully!');
                 } else {
-                    showSnackbar(data.error || 'Failed to send password to device');
+                    showSnackbar(data.error || 'Failed to get password');
                 }
             } catch (error) {
                 console.error('Error sending to device:', error);
                 showSnackbar('Error: ' + error.message);
+            }
+        }
+
+        // Initialize BLE when document loads
+        document.addEventListener('DOMContentLoaded', function() {
+            initBLE();
+            // ... existing DOMContentLoaded code ...
+        });
+
+        async function connectBLE() {
+            try {
+                const connected = await bleManager.connect();
+                if (connected) {
+                    document.querySelector('.action-button').disabled = true;
+                    document.querySelectorAll('.action-button')[1].disabled = false;
+                }
+            } catch (error) {
+                console.error('Failed to connect:', error);
+            }
+        }
+
+        async function disconnectBLE() {
+            try {
+                await bleManager.disconnect();
+                document.querySelector('.action-button').disabled = false;
+                document.querySelectorAll('.action-button')[1].disabled = true;
+            } catch (error) {
+                console.error('Failed to disconnect:', error);
             }
         }
     </script>

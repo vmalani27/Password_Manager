@@ -1,17 +1,20 @@
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from flask_bcrypt import Bcrypt
+from flask_cors import CORS
 import sqlite3
 import os
 import secrets
 from password_analyzer import PasswordStrengthAnalyzer
 from nlp_analyzer import NLPPasswordAnalyzer
 import pyperclip  # For clipboard operations
-# from bleak import BleakClient, BleakScanner
+from bleak import BleakScanner, BleakClient
 import asyncio
 import requests
 from requests.exceptions import RequestException
+import sys
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 bcrypt = Bcrypt(app)
 app.secret_key = secrets.token_hex(16)  # Secret key for session management
 
@@ -613,6 +616,74 @@ def get_esp32_credentials():
         return jsonify(response.json())
     except RequestException as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/devices')
+@require_login
+def devices_page():
+    return render_template('devices.html')
+
+@app.route('/scan_devices')
+@require_login
+def scan_devices():
+    try:
+        print("Starting BLE device scan...")
+        
+        # Create a new event loop for Windows
+        if sys.platform == 'win32':
+            loop = asyncio.ProactorEventLoop()
+            asyncio.set_event_loop(loop)
+        else:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Create a list to store discovered devices
+        discovered_devices = []
+        
+        # Define the callback function
+        def detection_callback(device, advertisement_data):
+            if device.name:
+                print(f"Found device: {device.name} ({device.address})")
+                discovered_devices.append({
+                    'name': device.name,
+                    'address': device.address,
+                    'rssi': device.rssi
+                })
+        
+        async def scan():
+            # Create scanner with callback
+            scanner = BleakScanner(detection_callback=detection_callback)
+            
+            # Start scanning
+            print("Scanning for BLE devices...")
+            await scanner.start()
+            
+            # Wait for 5 seconds
+            await asyncio.sleep(5)
+            
+            # Stop scanning
+            await scanner.stop()
+            
+            return discovered_devices
+        
+        # Run the scan
+        devices = loop.run_until_complete(scan())
+        
+        # Close the loop
+        loop.close()
+        
+        print(f"Found {len(devices)} devices")
+        
+        return jsonify({
+            'success': True,
+            'devices': devices
+        })
+        
+    except Exception as e:
+        print(f"Error in scan_devices: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f"BLE scan error: {str(e)}"
+        }), 500
 
 if __name__ == '__main__':
     init_db()

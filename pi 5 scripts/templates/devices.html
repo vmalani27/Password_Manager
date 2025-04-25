@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Device Scanner - Password Manager</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .device-list {
+            margin-top: 20px;
+        }
+        .device-item {
+            padding: 15px;
+            border: 1px solid #ddd;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: white;
+        }
+        .device-item:hover {
+            background-color: #f9f9f9;
+        }
+        .device-info {
+            flex-grow: 1;
+        }
+        .device-name {
+            font-weight: bold;
+            color: #2196F3;
+        }
+        .device-address {
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        .device-rssi {
+            color: #4CAF50;
+            font-size: 0.9em;
+        }
+        .action-button {
+            padding: 8px 16px;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        .action-button:hover {
+            background-color: #1976D2;
+        }
+        .action-button:disabled {
+            background-color: #BDBDBD;
+            cursor: not-allowed;
+        }
+        .scan-button {
+            background-color: #4CAF50;
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+        .scan-button:hover {
+            background-color: #45a049;
+        }
+        .status-section {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f5f5f5;
+            border-radius: 5px;
+        }
+        .notification-area {
+            min-height: 20px;
+            color: #666;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .loading::after {
+            content: "Scanning for devices...";
+            animation: dots 1.5s steps(5, end) infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: "Scanning for devices"; }
+            40% { content: "Scanning for devices."; }
+            60% { content: "Scanning for devices.."; }
+            80%, 100% { content: "Scanning for devices..."; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Device Scanner</h1>
+            <a href="{{ url_for('home') }}" class="action-button">Back to Dashboard</a>
+        </div>
+
+        <div class="status-section">
+            <button id="scanButton" class="action-button scan-button" onclick="startScan()">Scan for Devices</button>
+            <div id="loading" class="loading"></div>
+            <div id="notificationArea" class="notification-area"></div>
+        </div>
+
+        <div id="deviceList" class="device-list">
+            <!-- Devices will be listed here -->
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/ble_manager.js') }}"></script>
+    <script>
+        let isScanning = false;
+        let bleManager = new BLEManager();
+
+        async function startScan() {
+            if (isScanning) return;
+            
+            const scanButton = document.getElementById('scanButton');
+            const loading = document.getElementById('loading');
+            const deviceList = document.getElementById('deviceList');
+            const notificationArea = document.getElementById('notificationArea');
+            
+            isScanning = true;
+            scanButton.disabled = true;
+            loading.style.display = 'block';
+            deviceList.innerHTML = '';
+            notificationArea.textContent = 'Scanning for devices...';
+
+            try {
+                const response = await fetch('/scan_devices', {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                if (data.success) {
+                    if (data.devices.length === 0) {
+                        deviceList.innerHTML = '<p>No devices found. Make sure your devices are in pairing mode.</p>';
+                        notificationArea.textContent = 'Scan complete. No devices found.';
+                    } else {
+                        deviceList.innerHTML = data.devices.map(device => `
+                            <div class="device-item">
+                                <div class="device-info">
+                                    <div class="device-name">${device.name}</div>
+                                    <div class="device-address">${device.address}</div>
+                                    <div class="device-rssi">Signal Strength: ${device.rssi} dBm</div>
+                                </div>
+                                <button class="action-button" onclick="connectToDevice('${device.address}')">Connect</button>
+                            </div>
+                        `).join('');
+                        notificationArea.textContent = `Found ${data.devices.length} device(s)`;
+                    }
+                } else {
+                    notificationArea.textContent = `Error: ${data.error}`;
+                }
+            } catch (error) {
+                console.error('Scan error:', error);
+                notificationArea.textContent = `Error: ${error.message}. Please make sure the server is running and try again.`;
+                deviceList.innerHTML = '<p>Failed to scan for devices. Please check your connection and try again.</p>';
+            } finally {
+                isScanning = false;
+                scanButton.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        async function connectToDevice(address) {
+            const notificationArea = document.getElementById('notificationArea');
+            
+            try {
+                const connected = await bleManager.connectToDevice(address);
+                if (connected) {
+                    notificationArea.textContent = 'Connected successfully!';
+                    // Redirect to main page after successful connection
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1500);
+                }
+            } catch (error) {
+                notificationArea.textContent = `Connection failed: ${error.message}`;
+            }
+        }
+
+        // Initialize BLE manager when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            bleManager = new BLEManager();
+        });
+    </script>
+</body>
+</html> 
