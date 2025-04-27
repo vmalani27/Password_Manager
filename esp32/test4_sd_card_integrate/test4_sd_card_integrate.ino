@@ -1,7 +1,7 @@
 #include <SPI.h>
 #include <SD.h>
 
-#define SD_CS 5
+#define SD_CS 13
 File file;
 
 void setup() {

@@ -15,13 +15,15 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 extern "C" {
+  #define SQLITE_DEFAULT_MEMSTATUS 0
+  #define SQLITE_ESP32_HEAP_SIZE 20480
   #include "sqlite3.h"
 }
 
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NOTIFICATION_CHARACTERISTIC_UUID "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
-#define SD_CS 5
+#define SD_CS 13
 
 sqlite3 *db;
 sqlite3_stmt *res;
@@ -32,13 +34,6 @@ BLECharacteristic *pCharacteristic;
 
 void handleCommand(String cmdLine) {
   Serial.println("Processing command: " + cmdLine);
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Processing:");
-  display.println(cmdLine);
-  display.display();
 
   // Tokenize
   std::vector<String> tokens;
@@ -60,9 +55,6 @@ void handleCommand(String cmdLine) {
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
     response = rc == SQLITE_OK ? "Added successfully" : String("Error: ") + zErrMsg;
     Serial.println(response);
-    display.clearDisplay();
-    display.println(response);
-    display.display();
     sendNotification(response);
   }
 
@@ -77,9 +69,6 @@ void handleCommand(String cmdLine) {
       response = "Entry not found";
     }
     Serial.println(response);
-    display.clearDisplay();
-    display.println(response);
-    display.display();
     sendNotification(response);
     sqlite3_finalize(res);
   }
@@ -91,9 +80,6 @@ void handleCommand(String cmdLine) {
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
     response = rc == SQLITE_OK ? "Updated successfully" : String("Error: ") + zErrMsg;
     Serial.println(response);
-    display.clearDisplay();
-    display.println(response);
-    display.display();
     sendNotification(response);
   }
 
@@ -104,9 +90,6 @@ void handleCommand(String cmdLine) {
     rc = sqlite3_exec(db, sql.c_str(), 0, 0, &zErrMsg);
     response = rc == SQLITE_OK ? "Deleted successfully" : String("Error: ") + zErrMsg;
     Serial.println(response);
-    display.clearDisplay();
-    display.println(response);
-    display.display();
     sendNotification(response);
   }
 
@@ -120,9 +103,6 @@ void handleCommand(String cmdLine) {
       response += "Site: " + site + " | User: " + user + "\n";
     }
     Serial.println(response);
-    display.clearDisplay();
-    display.println(response);
-    display.display();
     sendNotification(response);
     sqlite3_finalize(res);
   }
@@ -130,19 +110,15 @@ void handleCommand(String cmdLine) {
   else {
     response = "Invalid command or wrong argument count";
     Serial.println(response);
-    display.clearDisplay();
-    display.println("Invalid command.");
-    display.display();
     sendNotification(response);
   }
 }
 
 class CommandCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pChar) override {
+    if (pChar == nullptr) return;
     String value = String(pChar->getValue().c_str());
-    if (!value.isEmpty()) {
-      handleCommand(String(value.c_str()));
-    }
+    if (!value.isEmpty()) handleCommand(value);
   }
 };
 
@@ -150,23 +126,11 @@ class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     pServer->getAdvertising()->stop(); // Stop advertising when connected
     Serial.println("Client connected.");
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("BLE Status: Connected");
-    display.display();
   }
 
   void onDisconnect(BLEServer* pServer) {
     pServer->getAdvertising()->start(); // Restart advertising when disconnected
     Serial.println("Client disconnected.");
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("BLE Status: Disconnected");
-    display.display();
   }
 };
 
@@ -193,25 +157,15 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // Initialize the display
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // 0x3C is the default I2C address
-    Serial.println("SSD1306 allocation failed");
-    for (;;);
-  }
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Initializing...");
-  display.display();
-
   if (!SD.begin(SD_CS)) {
-    Serial.println("SD card mount failed.");
-    display.clearDisplay();
-    display.println("SD card mount failed.");
-    display.display();
+    Serial.println("SD card initialization failed.");
     return;
   }
+  Serial.println("SD card initialized.");
+  delay(500); // Add delay for stability
+
+  BLEDevice::init("ESP32-GATT-Manager");
+  delay(500); // Add delay for BLE initialization
 
   sqlite3_initialize();
 
@@ -219,9 +173,11 @@ void setup() {
   if (rc) {
     Serial.print("Can't open DB: ");
     Serial.println(sqlite3_errmsg(db));
-    display.clearDisplay();
-    display.println("DB open failed.");
-    display.display();
+    return;
+  }
+
+  if (rc != SQLITE_OK) {
+    Serial.println("Failed to open database.");
     return;
   }
 
@@ -230,7 +186,6 @@ void setup() {
                     "site TEXT, username TEXT, password TEXT);";
   sqlite3_exec(db, sql, 0, 0, &zErrMsg);
 
-  BLEDevice::init("ESP32-GATT-Manager");
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
@@ -259,20 +214,18 @@ void setup() {
   pCharacteristic->setValue("Ready");
   pCharacteristic->notify();
 
+  pCharacteristic->setValue("Ready");
+  pCharacteristic->notify();
+
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->start();
 
-  BLEDevice::setMTU(512); // Maximum MTU size supported by BLE
+  BLEDevice::setMTU(256); // Use a smaller MTU size
 
   Serial.println("BLE GATT running. Waiting for command...");
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("BLE GATT running...");
-  display.println("Waiting for client...");
-  display.display();
 }
 
 void loop() {

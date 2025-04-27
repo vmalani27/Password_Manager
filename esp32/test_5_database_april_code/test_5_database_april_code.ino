@@ -6,7 +6,7 @@ extern "C" {
   #include "sqlite3.h"
 }
 
-#define SD_CS 5
+#define SD_CS 13
 
 sqlite3 *db;
 char *zErrMsg = 0;
@@ -17,7 +17,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  if (!SD.begin(SD_CS, SPI, 80000000))// High SPI speed for stability
+  if (!SD.begin(SD_CS))// High SPI speed for stability
  {
     Serial.println("SD card mount failed.");
     return;
