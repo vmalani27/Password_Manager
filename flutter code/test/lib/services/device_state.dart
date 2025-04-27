@@ -21,6 +21,7 @@ class DeviceState extends ChangeNotifier {
   bool _isConnecting = false;
   String? _error;
   List<Credential> _credentials = [];
+  bool _isRefreshingCredentials = false; // Add this flag
 
   DeviceState(this._bleService);
 
@@ -75,16 +76,29 @@ class DeviceState extends ChangeNotifier {
   }
 
   Future<void> _refreshCredentials() async {
+    if (_isRefreshingCredentials) {
+      debugPrint('Skipping refresh, already in progress.');
+      return; // Prevent multiple calls
+    }
+
     debugPrint('Refreshing credentials...');
+    _isRefreshingCredentials = true; // Set the flag to true
+
     try {
+      // Add a delay of 1 second before sending the command
+      await Future.delayed(const Duration(seconds: 1));
+
+      // Send the "list" command only once
       final response = await _bleService.sendCommand('list');
       debugPrint('Received credentials response: $response');
       _parseCredentials(response);
     } catch (e) {
       debugPrint('Error refreshing credentials: $e');
       _error = e.toString();
+    } finally {
+      _isRefreshingCredentials = false; // Reset the flag
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   void _parseCredentials(String response) {

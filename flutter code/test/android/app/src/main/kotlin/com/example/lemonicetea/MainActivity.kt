@@ -1,0 +1,5 @@
+package com.example.lemonicetea
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
