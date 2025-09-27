@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart' as reactive_ble;
+import 'ble_uuids.dart';
 import 'package:flutter/foundation.dart';
 
 class BLEService {
@@ -88,8 +89,8 @@ class BLEService {
 
     try {
       final characteristic = reactive_ble.QualifiedCharacteristic(
-        serviceId: reactive_ble.Uuid.parse("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"),
-        characteristicId: reactive_ble.Uuid.parse("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"), // Notification UUID
+        serviceId: reactive_ble.Uuid.parse(SERVICE_UUID),
+        characteristicId: reactive_ble.Uuid.parse(NOTIFICATION_CHARACTERISTIC_UUID),
         deviceId: _connectedDeviceId!,
       );
 
@@ -146,14 +147,14 @@ class BLEService {
     for (int attempt = 1; attempt <= retries; attempt++) {
       try {
         final writeCharacteristic = reactive_ble.QualifiedCharacteristic(
-          serviceId: reactive_ble.Uuid.parse("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"),
-          characteristicId: reactive_ble.Uuid.parse("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"), // Write UUID
+          serviceId: reactive_ble.Uuid.parse(SERVICE_UUID),
+          characteristicId: reactive_ble.Uuid.parse(CHARACTERISTIC_UUID),
           deviceId: _connectedDeviceId!,
         );
 
         final notificationCharacteristic = reactive_ble.QualifiedCharacteristic(
-          serviceId: reactive_ble.Uuid.parse("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"),
-          characteristicId: reactive_ble.Uuid.parse("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"), // Notification UUID
+          serviceId: reactive_ble.Uuid.parse(SERVICE_UUID),
+          characteristicId: reactive_ble.Uuid.parse(NOTIFICATION_CHARACTERISTIC_UUID),
           deviceId: _connectedDeviceId!,
         );
 
