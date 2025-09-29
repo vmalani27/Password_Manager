@@ -20,7 +20,9 @@ class _DeviceScanPageState extends State<DeviceScanPage> {
   @override
   void initState() {
     super.initState();
-    _startScan();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_mounted) _startScan();
+    });
   }
 
   @override
@@ -176,7 +178,7 @@ class _DeviceScanPageState extends State<DeviceScanPage> {
                                   color: Theme.of(context).primaryColor,
                                 ),
                               ),
-                              title: Text(device.name),
+                              title: Text(device.name.isNotEmpty ? device.name : 'Unknown'),
                               subtitle: Text(device.id),
                               trailing: ElevatedButton(
                                 onPressed: () {
@@ -194,4 +196,4 @@ class _DeviceScanPageState extends State<DeviceScanPage> {
       ),
     );
   }
-} 
+}
