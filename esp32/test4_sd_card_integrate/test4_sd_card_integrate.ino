@@ -1,7 +1,13 @@
 #include <SPI.h>
 #include <SD.h>
 
-#define SD_CS 13
+#define SD_CS 5
+#define SD_MOSI 23
+#define SD_MISO 19
+#define SD_SCK 18
+
+SPIClass spi = SPIClass(VSPI);
+
 File file;
 
 void setup() {
@@ -10,6 +16,8 @@ void setup() {
   delay(1000);
 
   Serial.println("Initializing SD card...");
+
+  
 
   if (!SD.begin(SD_CS)) {
     Serial.println("SD card initialization failed.");
