@@ -4,6 +4,7 @@
   - prepared statements for SQL (prevent injection)
   - rate limiting + lockout on failed AUTH attempts
   - basic audit logging table
+  - AES-256-GCM credential encryption at rest
   - keeps existing OLED/notification behavior
 */
 
@@ -20,6 +21,11 @@ extern "C" {
   #include "sqlite3.h"
 }
 #include "esp_system.h" // for esp_random()
+
+// AES-256 Encryption support
+#include "encryption_utils.h"
+#include "key_manager.h"
+#include "database_migration.h"
 
 // ----- Config -----
 #define SCREEN_WIDTH 128
@@ -98,18 +104,61 @@ String generateSessionToken() {
   return String(buf);
 }
 
-// ----- SQLite helpers (prepared statements) -----
-// Note: these wrapper functions inline parameterized queries (safe)
+// ----- SQLite helpers (prepared statements with AES-256 encryption) -----
+// Note: these wrapper functions use encrypted storage with authenticated encryption
 bool insertCredential(const String &site, const String &username, const String &password) {
-  const char* sql = "INSERT INTO credentials (site, username, password) VALUES (?, ?, ?);";
+  // Get master key for encryption
+  uint8_t masterKey[MASTER_KEY_SIZE];
+  if (!getMasterKey(masterKey)) {
+    updateOutput("Failed to get master key for insert");
+    return false;
+  }
+  
+  // Encrypt each field separately
+  String site_encrypted, site_iv, site_tag;
+  String username_encrypted, username_iv, username_tag;
+  String password_encrypted, password_iv, password_tag;
+  
+  bool encrypt_success = true;
+  encrypt_success &= encryptCredentialField(site, masterKey, CONTEXT_SITE, 
+                                           site_encrypted, site_iv, site_tag);
+  encrypt_success &= encryptCredentialField(username, masterKey, CONTEXT_USERNAME,
+                                           username_encrypted, username_iv, username_tag);
+  encrypt_success &= encryptCredentialField(password, masterKey, CONTEXT_PASSWORD,
+                                           password_encrypted, password_iv, password_tag);
+  
+  // Clear master key from memory
+  secureZero(masterKey, sizeof(masterKey));
+  
+  if (!encrypt_success) {
+    updateOutput("Encryption failed during insert");
+    return false;
+  }
+  
+  // Insert encrypted data
+  const char* sql = 
+    "INSERT INTO credentials "
+    "(site_encrypted, site_iv, site_tag, "
+    " username_encrypted, username_iv, username_tag, "
+    " password_encrypted, password_iv, password_tag) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+  
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     updateOutput("Prepare failed (insert): " + String(sqlite3_errmsg(db)));
     return false;
   }
-  sqlite3_bind_text(stmt, 1, site.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, password.c_str(), -1, SQLITE_TRANSIENT);
+  
+  sqlite3_bind_text(stmt, 1, site_encrypted.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 2, site_iv.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 3, site_tag.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 4, username_encrypted.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 5, username_iv.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 6, username_tag.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 7, password_encrypted.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 8, password_iv.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 9, password_tag.c_str(), -1, SQLITE_TRANSIENT);
+  
   bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
   if (!ok) updateOutput("Insert step failed: " + String(sqlite3_errmsg(db)));
   sqlite3_finalize(stmt);
@@ -117,72 +166,318 @@ bool insertCredential(const String &site, const String &username, const String &
 }
 
 bool updateCredential(const String &site, const String &username, const String &password) {
-  const char* sql = "UPDATE credentials SET password=? WHERE site=? AND username=?;";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+  // Get master key for encryption
+  uint8_t masterKey[MASTER_KEY_SIZE];
+  if (!getMasterKey(masterKey)) {
+    updateOutput("Failed to get master key for update");
+    return false;
+  }
+  
+  // Encrypt the new password
+  String password_encrypted, password_iv, password_tag;
+  bool encrypt_success = encryptCredentialField(password, masterKey, CONTEXT_PASSWORD,
+                                               password_encrypted, password_iv, password_tag);
+  
+  if (!encrypt_success) {
+    secureZero(masterKey, sizeof(masterKey));
+    updateOutput("Password encryption failed during update");
+    return false;
+  }
+  
+  // For site and username matching, we need to encrypt them to compare
+  String site_encrypted, site_iv, site_tag;
+  String username_encrypted, username_iv, username_tag;
+  
+  encrypt_success &= encryptCredentialField(site, masterKey, CONTEXT_SITE,
+                                           site_encrypted, site_iv, site_tag);
+  encrypt_success &= encryptCredentialField(username, masterKey, CONTEXT_USERNAME,
+                                           username_encrypted, username_iv, username_tag);
+  
+  // Clear master key from memory
+  secureZero(masterKey, sizeof(masterKey));
+  
+  if (!encrypt_success) {
+    updateOutput("Site/username encryption failed during update");
+    return false;
+  }
+  
+  // Update by finding matching encrypted site and username
+  // Note: This is complex with encrypted data, so we'll do a search and update approach
+  const char* select_sql = 
+    "SELECT id, site_encrypted, site_iv, site_tag, "
+    "        username_encrypted, username_iv, username_tag "
+    "FROM credentials;";
+  
+  sqlite3_stmt *select_stmt = nullptr;
+  if (sqlite3_prepare_v2(db, select_sql, -1, &select_stmt, nullptr) != SQLITE_OK) {
+    updateOutput("Prepare failed (update select): " + String(sqlite3_errmsg(db)));
+    return false;
+  }
+  
+  int target_id = -1;
+  
+  // Find the matching record by decrypting and comparing
+  if (!getMasterKey(masterKey)) {
+    updateOutput("Failed to get master key for update search");
+    sqlite3_finalize(select_stmt);
+    return false;
+  }
+  
+  while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+    int id = sqlite3_column_int(select_stmt, 0);
+    const char* stored_site_enc = (const char*)sqlite3_column_text(select_stmt, 1);
+    const char* stored_site_iv = (const char*)sqlite3_column_text(select_stmt, 2);
+    const char* stored_site_tag = (const char*)sqlite3_column_text(select_stmt, 3);
+    const char* stored_username_enc = (const char*)sqlite3_column_text(select_stmt, 4);
+    const char* stored_username_iv = (const char*)sqlite3_column_text(select_stmt, 5);
+    const char* stored_username_tag = (const char*)sqlite3_column_text(select_stmt, 6);
+    
+    if (!stored_site_enc || !stored_site_iv || !stored_site_tag ||
+        !stored_username_enc || !stored_username_iv || !stored_username_tag) {
+      continue;
+    }
+    
+    // Decrypt stored values and compare
+    String decrypted_site, decrypted_username;
+    bool decrypt_success = true;
+    decrypt_success &= decryptCredentialField(String(stored_site_enc), String(stored_site_iv), 
+                                             String(stored_site_tag), masterKey, CONTEXT_SITE, decrypted_site);
+    decrypt_success &= decryptCredentialField(String(stored_username_enc), String(stored_username_iv),
+                                             String(stored_username_tag), masterKey, CONTEXT_USERNAME, decrypted_username);
+    
+    if (decrypt_success && decrypted_site == site && decrypted_username == username) {
+      target_id = id;
+      break;
+    }
+  }
+  
+  sqlite3_finalize(select_stmt);
+  secureZero(masterKey, sizeof(masterKey));
+  
+  if (target_id == -1) {
+    updateOutput("No matching credential found for update");
+    return false;
+  }
+  
+  // Update the password for the found record
+  const char* update_sql = 
+    "UPDATE credentials SET "
+    "password_encrypted=?, password_iv=?, password_tag=? "
+    "WHERE id=?;";
+  
+  sqlite3_stmt *update_stmt = nullptr;
+  if (sqlite3_prepare_v2(db, update_sql, -1, &update_stmt, nullptr) != SQLITE_OK) {
     updateOutput("Prepare failed (update): " + String(sqlite3_errmsg(db)));
     return false;
   }
-  sqlite3_bind_text(stmt, 1, password.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, site.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, username.c_str(), -1, SQLITE_TRANSIENT);
-  bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+  
+  sqlite3_bind_text(update_stmt, 1, password_encrypted.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(update_stmt, 2, password_iv.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(update_stmt, 3, password_tag.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(update_stmt, 4, target_id);
+  
+  bool ok = (sqlite3_step(update_stmt) == SQLITE_DONE);
   if (!ok) updateOutput("Update step failed: " + String(sqlite3_errmsg(db)));
-  sqlite3_finalize(stmt);
+  sqlite3_finalize(update_stmt);
   return ok;
 }
 
 bool deleteCredential(const String &site, const String &username) {
-  const char* sql = "DELETE FROM credentials WHERE site=? AND username=?;";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+  // Get master key for decryption during search
+  uint8_t masterKey[MASTER_KEY_SIZE];
+  if (!getMasterKey(masterKey)) {
+    updateOutput("Failed to get master key for delete");
+    return false;
+  }
+  
+  // Search for the matching record by decrypting stored values
+  const char* select_sql = 
+    "SELECT id, site_encrypted, site_iv, site_tag, "
+    "        username_encrypted, username_iv, username_tag "
+    "FROM credentials;";
+  
+  sqlite3_stmt *select_stmt = nullptr;
+  if (sqlite3_prepare_v2(db, select_sql, -1, &select_stmt, nullptr) != SQLITE_OK) {
+    updateOutput("Prepare failed (delete select): " + String(sqlite3_errmsg(db)));
+    secureZero(masterKey, sizeof(masterKey));
+    return false;
+  }
+  
+  int target_id = -1;
+  
+  while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+    int id = sqlite3_column_int(select_stmt, 0);
+    const char* stored_site_enc = (const char*)sqlite3_column_text(select_stmt, 1);
+    const char* stored_site_iv = (const char*)sqlite3_column_text(select_stmt, 2);
+    const char* stored_site_tag = (const char*)sqlite3_column_text(select_stmt, 3);
+    const char* stored_username_enc = (const char*)sqlite3_column_text(select_stmt, 4);
+    const char* stored_username_iv = (const char*)sqlite3_column_text(select_stmt, 5);
+    const char* stored_username_tag = (const char*)sqlite3_column_text(select_stmt, 6);
+    
+    if (!stored_site_enc || !stored_site_iv || !stored_site_tag ||
+        !stored_username_enc || !stored_username_iv || !stored_username_tag) {
+      continue;
+    }
+    
+    // Decrypt stored values and compare
+    String decrypted_site, decrypted_username;
+    bool decrypt_success = true;
+    decrypt_success &= decryptCredentialField(String(stored_site_enc), String(stored_site_iv), 
+                                             String(stored_site_tag), masterKey, CONTEXT_SITE, decrypted_site);
+    decrypt_success &= decryptCredentialField(String(stored_username_enc), String(stored_username_iv),
+                                             String(stored_username_tag), masterKey, CONTEXT_USERNAME, decrypted_username);
+    
+    if (decrypt_success && decrypted_site == site && decrypted_username == username) {
+      target_id = id;
+      break;
+    }
+  }
+  
+  sqlite3_finalize(select_stmt);
+  secureZero(masterKey, sizeof(masterKey));
+  
+  if (target_id == -1) {
+    updateOutput("No matching credential found for delete");
+    return false;
+  }
+  
+  // Delete the found record
+  const char* delete_sql = "DELETE FROM credentials WHERE id=?;";
+  sqlite3_stmt *delete_stmt = nullptr;
+  if (sqlite3_prepare_v2(db, delete_sql, -1, &delete_stmt, nullptr) != SQLITE_OK) {
     updateOutput("Prepare failed (delete): " + String(sqlite3_errmsg(db)));
     return false;
   }
-  sqlite3_bind_text(stmt, 1, site.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-  bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+  
+  sqlite3_bind_int(delete_stmt, 1, target_id);
+  bool ok = (sqlite3_step(delete_stmt) == SQLITE_DONE);
   if (!ok) updateOutput("Delete step failed: " + String(sqlite3_errmsg(db)));
-  sqlite3_finalize(stmt);
+  sqlite3_finalize(delete_stmt);
   return ok;
 }
 
 // Get password (returns empty string on not found or error)
 String getPassword(const String &site, const String &username) {
-  const char* sql = "SELECT password FROM credentials WHERE site=? AND username=?;";
+  // Get master key for decryption during search
+  uint8_t masterKey[MASTER_KEY_SIZE];
+  if (!getMasterKey(masterKey)) {
+    updateOutput("Failed to get master key for password retrieval");
+    return "";
+  }
+  
+  // Search for the matching record by decrypting stored values
+  const char* select_sql = 
+    "SELECT site_encrypted, site_iv, site_tag, "
+    "       username_encrypted, username_iv, username_tag, "
+    "       password_encrypted, password_iv, password_tag "
+    "FROM credentials;";
+  
   sqlite3_stmt *stmt = nullptr;
-  String out = "";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    updateOutput("Prepare failed (select): " + String(sqlite3_errmsg(db)));
-    return out;
+  String result = "";
+  
+  if (sqlite3_prepare_v2(db, select_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    updateOutput("Prepare failed (password select): " + String(sqlite3_errmsg(db)));
+    secureZero(masterKey, sizeof(masterKey));
+    return result;
   }
-  sqlite3_bind_text(stmt, 1, site.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-  if (sqlite3_step(stmt) == SQLITE_ROW) {
-    const unsigned char* txt = sqlite3_column_text(stmt, 0);
-    if (txt) out = String((const char*)txt);
+  
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    const char* stored_site_enc = (const char*)sqlite3_column_text(stmt, 0);
+    const char* stored_site_iv = (const char*)sqlite3_column_text(stmt, 1);
+    const char* stored_site_tag = (const char*)sqlite3_column_text(stmt, 2);
+    const char* stored_username_enc = (const char*)sqlite3_column_text(stmt, 3);
+    const char* stored_username_iv = (const char*)sqlite3_column_text(stmt, 4);
+    const char* stored_username_tag = (const char*)sqlite3_column_text(stmt, 5);
+    const char* stored_password_enc = (const char*)sqlite3_column_text(stmt, 6);
+    const char* stored_password_iv = (const char*)sqlite3_column_text(stmt, 7);
+    const char* stored_password_tag = (const char*)sqlite3_column_text(stmt, 8);
+    
+    if (!stored_site_enc || !stored_site_iv || !stored_site_tag ||
+        !stored_username_enc || !stored_username_iv || !stored_username_tag ||
+        !stored_password_enc || !stored_password_iv || !stored_password_tag) {
+      continue;
+    }
+    
+    // Decrypt stored site and username to compare
+    String decrypted_site, decrypted_username;
+    bool decrypt_success = true;
+    decrypt_success &= decryptCredentialField(String(stored_site_enc), String(stored_site_iv), 
+                                             String(stored_site_tag), masterKey, CONTEXT_SITE, decrypted_site);
+    decrypt_success &= decryptCredentialField(String(stored_username_enc), String(stored_username_iv),
+                                             String(stored_username_tag), masterKey, CONTEXT_USERNAME, decrypted_username);
+    
+    if (decrypt_success && decrypted_site == site && decrypted_username == username) {
+      // Found matching record, decrypt and return password
+      String decrypted_password;
+      if (decryptCredentialField(String(stored_password_enc), String(stored_password_iv),
+                                 String(stored_password_tag), masterKey, CONTEXT_PASSWORD, decrypted_password)) {
+        result = decrypted_password;
+        break;
+      } else {
+        updateOutput("Failed to decrypt password");
+        break;
+      }
+    }
   }
+  
   sqlite3_finalize(stmt);
-  return out;
+  secureZero(masterKey, sizeof(masterKey));
+  return result;
 }
 
 // List credentials (site | username pairs); returns multi-line string
 String listCredentials() {
-  const char* sql = "SELECT site, username FROM credentials;";
+  // Get master key for decryption
+  uint8_t masterKey[MASTER_KEY_SIZE];
+  if (!getMasterKey(masterKey)) {
+    updateOutput("Failed to get master key for credential listing");
+    return "";
+  }
+  
+  const char* sql = 
+    "SELECT site_encrypted, site_iv, site_tag, "
+    "       username_encrypted, username_iv, username_tag "
+    "FROM credentials;";
+  
   sqlite3_stmt *stmt = nullptr;
   String out = "";
+  
   if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     updateOutput("Prepare failed (list): " + String(sqlite3_errmsg(db)));
+    secureZero(masterKey, sizeof(masterKey));
     return out;
   }
+  
   while (sqlite3_step(stmt) == SQLITE_ROW) {
-    const unsigned char* s = sqlite3_column_text(stmt, 0);
-    const unsigned char* u = sqlite3_column_text(stmt, 1);
-    if (s && u) {
-      out += "Site: " + String((const char*)s) + " | User: " + String((const char*)u) + "\n";
+    const char* site_enc = (const char*)sqlite3_column_text(stmt, 0);
+    const char* site_iv = (const char*)sqlite3_column_text(stmt, 1);
+    const char* site_tag = (const char*)sqlite3_column_text(stmt, 2);
+    const char* username_enc = (const char*)sqlite3_column_text(stmt, 3);
+    const char* username_iv = (const char*)sqlite3_column_text(stmt, 4);
+    const char* username_tag = (const char*)sqlite3_column_text(stmt, 5);
+    
+    if (!site_enc || !site_iv || !site_tag ||
+        !username_enc || !username_iv || !username_tag) {
+      continue;
+    }
+    
+    // Decrypt site and username for display
+    String decrypted_site, decrypted_username;
+    bool decrypt_success = true;
+    decrypt_success &= decryptCredentialField(String(site_enc), String(site_iv), 
+                                             String(site_tag), masterKey, CONTEXT_SITE, decrypted_site);
+    decrypt_success &= decryptCredentialField(String(username_enc), String(username_iv),
+                                             String(username_tag), masterKey, CONTEXT_USERNAME, decrypted_username);
+    
+    if (decrypt_success) {
+      out += "Site: " + decrypted_site + " | User: " + decrypted_username + "\n";
+    } else {
+      out += "Site: [decrypt failed] | User: [decrypt failed]\n";
     }
   }
+  
   sqlite3_finalize(stmt);
+  secureZero(masterKey, sizeof(masterKey));
   return out;
 }
 
@@ -417,6 +712,19 @@ void setup() {
   updateOutput("SD initialized.");
   delay(200);
 
+  // Initialize encryption system
+  updateOutput("Initializing encryption...");
+  if (!initEncryption()) {
+    updateOutput("Encryption init failed!");
+    while (true); // halt if encryption fails
+  }
+  if (!initKeyManager()) {
+    updateOutput("Key manager init failed!");
+    while (true); // halt if key manager fails
+  }
+  updateOutput("Encryption ready.");
+  delay(200);
+
   // SQLite
   sqlite3_initialize();
   rc = sqlite3_open("/sd/credentials.db", &db);
@@ -424,9 +732,14 @@ void setup() {
     updateOutput("DB open failed: " + String(sqlite3_errmsg(db)));
     // continue but DB won't work
   } else {
-    // create tables if not exists
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY AUTOINCREMENT, site TEXT, username TEXT, password TEXT);", 0, 0, &zErrMsg);
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER, event TEXT, user TEXT);", 0, 0, &zErrMsg);
+    // Initialize database with encryption migration
+    updateOutput("Setting up database...");
+    if (!initializeDatabase(db)) {
+      updateOutput("DB migration failed!");
+      // continue but note the error
+    } else {
+      updateOutput("Database ready (encrypted).");
+    }
   }
 
   // BLE init (Bluedroid)
