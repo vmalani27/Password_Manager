@@ -25,7 +25,6 @@ extern "C" {
 // AES-256 Encryption support
 #include "encryption_utils.h"
 #include "key_manager.h"
-#include "database_migration.h"
 
 // ----- Config -----
 #define SCREEN_WIDTH 128
@@ -732,11 +731,47 @@ void setup() {
     updateOutput("DB open failed: " + String(sqlite3_errmsg(db)));
     // continue but DB won't work
   } else {
-    // Initialize database with encryption migration
+    // Create encrypted database tables
     updateOutput("Setting up database...");
-    if (!initializeDatabase(db)) {
-      updateOutput("DB migration failed!");
-      // continue but note the error
+    
+    // Create encrypted credentials table
+    const char* create_credentials_sql = 
+      "CREATE TABLE IF NOT EXISTS credentials ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+      "site_encrypted TEXT NOT NULL, "
+      "site_iv TEXT NOT NULL, "
+      "site_tag TEXT NOT NULL, "
+      "username_encrypted TEXT NOT NULL, "
+      "username_iv TEXT NOT NULL, "
+      "username_tag TEXT NOT NULL, "
+      "password_encrypted TEXT NOT NULL, "
+      "password_iv TEXT NOT NULL, "
+      "password_tag TEXT NOT NULL, "
+      "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+      "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+      ");";
+    
+    // Create audit log table
+    const char* create_audit_sql = 
+      "CREATE TABLE IF NOT EXISTS audit_log ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+      "action TEXT NOT NULL, "
+      "session_id TEXT, "
+      "details TEXT, "
+      "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+      ");";
+    
+    char* errMsg = nullptr;
+    int rc_create = sqlite3_exec(db, create_credentials_sql, nullptr, nullptr, &errMsg);
+    if (rc_create != SQLITE_OK) {
+      updateOutput("Create credentials table failed: " + String(errMsg));
+      sqlite3_free(errMsg);
+    }
+    
+    rc_create = sqlite3_exec(db, create_audit_sql, nullptr, nullptr, &errMsg);
+    if (rc_create != SQLITE_OK) {
+      updateOutput("Create audit table failed: " + String(errMsg));
+      sqlite3_free(errMsg);
     } else {
       updateOutput("Database ready (encrypted).");
     }

@@ -332,8 +332,7 @@ bool backupPlaintextCredentials(sqlite3* db) {
     Serial.println("[DB_MIGRATION] Creating backup of plaintext credentials...");
     
     const char* sql = 
-        "CREATE TABLE IF NOT EXISTS credentials_backup_" 
-        "AS SELECT * FROM credentials;";
+        "CREATE TABLE credentials_backup AS SELECT * FROM credentials;";
     
     char* errMsg = nullptr;
     int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
