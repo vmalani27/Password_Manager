@@ -1,0 +1,19 @@
+{
+  "name": "secure_core",
+  "version": "1.0.0",
+  "description": "Encryption library for ESP32 password manager using HMAC-derived runtime keys",
+  "keywords": "encryption, aes, hmac, efuse, esp32",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "flags": [
+      "-I."
+    ],
+    "srcFilter": [
+      "+<*.cpp>"
+    ]
+  },
+  "dependencies": {
+    "mbedtls": "*"
+  }
+}
