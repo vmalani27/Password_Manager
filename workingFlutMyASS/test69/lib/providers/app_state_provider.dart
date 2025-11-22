@@ -104,12 +104,14 @@ final sessionManagerProvider = Provider<SessionManager>((ref) {
 
 /// Main application state provider
 final appStateProvider = StateNotifierProvider<AppStateNotifier, AppState>((ref) {
+  final commandService = ref.watch(commandServiceProvider);
   final bleService = ref.watch(bleConnectionServiceProvider);
   final authService = ref.watch(authServiceProvider);
   final credentialService = ref.watch(credentialServiceProvider);
   final sessionManager = ref.watch(sessionManagerProvider);
   
   return AppStateNotifier(
+    commandService: commandService,
     bleService: bleService,
     authService: authService,
     credentialService: credentialService,
@@ -119,12 +121,14 @@ final appStateProvider = StateNotifierProvider<AppStateNotifier, AppState>((ref)
 
 /// State notifier that manages the entire application flow
 class AppStateNotifier extends StateNotifier<AppState> {
+  final CommandService commandService;
   final BleConnectionService bleService;
   final AuthService authService;
   final CredentialService credentialService;
   final SessionManager sessionManager;
 
   AppStateNotifier({
+    required this.commandService,
     required this.bleService,
     required this.authService,
     required this.credentialService,
@@ -150,15 +154,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
   }
 
-  /// Complete connection and authentication flow
+  /// Complete connection and authentication flow (with device pairing support)
   /// 
   /// Steps:
   /// 1. Connect to BLE device (triggers OS pairing if not bonded)
   /// 2. Subscribe to notifications
-  /// 3. Request session token from ESP32
-  /// 4. Authenticate with PIN
+  /// 3. Perform ECDH key exchange (loads saved keys for reconnection or generates new for first pairing)
+  /// 4. Authenticate with ECDH challenge-response
   /// 5. Update state to ready
-  Future<void> connectAndAuthenticate({
+  /// 
+  /// Returns true if this is a new pairing (vs reconnection)
+  Future<bool> connectAndAuthenticate({
     required String deviceId,
     required String deviceName,
     required String pin,
@@ -197,14 +203,32 @@ class AppStateNotifier extends StateNotifier<AppState> {
       await Future.delayed(const Duration(milliseconds: 500));
       debugPrint('[AppState] Ready to send commands');
       
-      // Step 3 & 4: Authenticate (request token + auth)
+      // Step 3: Perform ECDH key exchange (with pairing support)
       state = state.copyWith(
         authState: AuthState.requestingToken,
         connectionState: ConnectionState.authenticating,
       );
       
-      await authService.performAuthentication(deviceId, pin);
-      debugPrint('[AppState] Authentication successful');
+      debugPrint('[AppState] Starting ECDH handshake...');
+      final result = await commandService.performEcdhHandshake(deviceId, deviceName);
+      final ecdh = result.ecdh;
+      final isNewPairing = result.isNewPairing;
+      
+      if (isNewPairing) {
+        debugPrint('[AppState] New device pairing established!');
+      } else {
+        debugPrint('[AppState] Reconnected to paired device');
+      }
+      
+      // Step 4: Authenticate using ECDH challenge-response
+      debugPrint('[AppState] Authenticating with ECDH...');
+      final authenticated = await commandService.authenticateWithEcdh(ecdh);
+      
+      if (!authenticated) {
+        throw Exception('ECDH authentication failed');
+      }
+      
+      debugPrint('[AppState] ECDH authentication successful');
       
       // Update session manager
       sessionManager.setAuthState(AuthState.authenticated);
@@ -220,6 +244,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
       await refreshCredentials();
       
       debugPrint('[AppState] Connection flow complete - ready for operations');
+      
+      return isNewPairing;
       
     } catch (e) {
       debugPrint('[AppState] Connection flow failed: $e');
@@ -258,6 +284,35 @@ class AppStateNotifier extends StateNotifier<AppState> {
       debugPrint('[AppState] Disconnect error: $e');
       // Still reset state even if disconnect fails
       state = const AppState();
+    }
+  }
+  
+  /// Unpair from the current device
+  /// This will disconnect, send unpair command to ESP32, and remove local pairing data
+  Future<void> unpairDevice() async {
+    try {
+      debugPrint('[AppState] Unpairing device...');
+      
+      // Disconnect first (if connected)
+      if (state.connectedDeviceId != null) {
+        await disconnect();
+      }
+      
+      // Send unpair command and remove local data
+      await commandService.unpairDevice();
+      
+      state = state.copyWith(
+        clearError: true,
+      );
+      
+      debugPrint('[AppState] Device unpaired successfully');
+      
+    } catch (e) {
+      debugPrint('[AppState] Unpair error: $e');
+      state = state.copyWith(
+        errorMessage: 'Failed to unpair: $e',
+      );
+      rethrow;
     }
   }
 

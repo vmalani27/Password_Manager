@@ -47,6 +47,10 @@ dependencies:
   # Storage (minimal use - only for remembering last connected device ID)
   shared_preferences: ^2.2.3
   
+  # Cryptography for ECDH
+  pointycastle: ^3.7.3
+  convert: ^3.1.1
+  
   # Utilities
   equatable: ^2.0.5
 

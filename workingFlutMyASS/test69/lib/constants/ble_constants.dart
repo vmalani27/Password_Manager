@@ -1,11 +1,14 @@
 /// BLE UUIDs and constants for ESP32 Password Manager
 class BleConstants {
-  BleConstants._(); // Private constructor - this is a static class
+  BleConstants._();
   
-  /// Expected device name - primary way to identify our device during scan
-  static const String expectedDeviceName = 'ESP32-GATT-Manager';
+  /// Expected device name prefix - devices will be "ESP32-PWD-Manager-XXXX"
+  /// where XXXX is last 4 chars of device's Bluetooth MAC address
+  static const String deviceNamePrefix = 'ESP32-PWD-Manager';
   
   /// Service UUID - This is advertised by the ESP32
+  /// NOTE: This is currently the same across all devices (development only)
+  /// TODO Phase 1: Make this device-unique for production
   static const String serviceUuid = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
   
   /// Write characteristic UUID (for sending commands to ESP32)
@@ -15,6 +18,15 @@ class BleConstants {
   /// Notification characteristic UUID (for receiving responses from ESP32)
   /// ESP32 sends responses like "TOKEN <hex>", "AUTH OK", "Password: xyz", etc.
   static const String notificationCharacteristicUuid = '6E400003-B5A3-F393-E0A9-E50E24DCCA9E';
+  
+  /// Device Identity characteristic UUID (read-only)
+  /// ESP32 exposes device fingerprint for pairing verification
+  /// Format: MAC address or device-specific UUID
+  static const String deviceIdentityCharacteristicUuid = '6E400004-B5A3-F393-E0A9-E50E24DCCA9E';
+  
+  /// ECDH characteristic UUID (for key exchange)
+  /// Used for reading ESP32's public key and writing client's public key
+  static const String ecdhCharacteristicUuid = '6E400005-B5A3-F393-E0A9-E50E24DCCA9E';
   
   /// BLE connection timeout (increased for bonding)
   static const Duration connectionTimeout = Duration(seconds: 30);
@@ -30,6 +42,12 @@ class BleConstants {
   
   /// Auto-reconnect delay after disconnect
   static const Duration reconnectDelay = Duration(seconds: 2);
+  
+  /// Security constants
+  static const int minTokenLength = 32; // 128 bits in hex = 32 chars
+  static const Duration sessionTimeout = Duration(minutes: 5);
+  static const int maxAuthAttempts = 5;
+  static const Duration lockoutDuration = Duration(minutes: 1);
 }
 
 /// ESP32 command prefixes and response patterns
@@ -48,6 +66,14 @@ class Esp32Commands {
   static const String list = 'list';
   static const String logout = 'logout';
   
+  // New commands for device identity
+  static const String getDeviceIdentity = 'get_identity';
+  
+  // ECDH authentication commands
+  static const String ecdhAuth = 'ecdh_auth';
+  static String respond(String hmacHex) => 'respond $hmacHex';
+  static const String unpair = 'unpair';
+  
   // Expected response prefixes
   static const String tokenPrefix = 'TOKEN ';
   static const String authOk = 'AUTH OK';
@@ -64,84 +90,20 @@ class Esp32Commands {
   static const String updateFail = 'UPDATE FAIL';
   static const String deleteFail = 'DELETE FAIL';
   static const String invalid = 'INVALID';
+  
+  // ECDH response prefixes
+  static const String ecdhOk = 'ECDH_OK';
+  static const String ecdhOkPaired = 'ECDH_OK_PAIRED';
+  static const String ecdhAlreadyPaired = 'ECDH_ALREADY_PAIRED';
+  static const String ecdhFail = 'ECDH_FAIL';
+  static const String ecdhInvalid = 'ECDH_INVALID';
+  static const String ecdhNotReady = 'ECDH NOT READY';
+  static const String challengePrefix = 'CHALLENGE ';
+  static const String noChallenge = 'NO CHALLENGE';
+  static const String invalidResponse = 'INVALID RESPONSE';
+  static const String unpaired = 'UNPAIRED';
+  
+  // Security responses
+  static const String passwordReady = 'PW_READY'; // Future: instead of plaintext password
+  static const String deviceIdentityPrefix = 'DEVICE_ID: ';
 }
-
-/*
- * ============================================================================
- * SECURITY & PRODUCTION CONSIDERATIONS FOR BLE UUIDs
- * ============================================================================
- * 
- * CURRENT STATE (Development):
- * - Using hardcoded UUIDs that are the same across all devices
- * - Device identified by name only ("ESP32-GATT-Manager")
- * - No device-specific authentication beyond session tokens
- * 
- * PRODUCTION CONCERNS:
- * 1. DEVICE UNIQUENESS
- *    - Multiple ESP32 devices in proximity will have identical UUIDs
- *    - Flutter app cannot distinguish between different physical devices
- *    - Risk: User connects to wrong password manager
- * 
- * 2. UUID SPOOFING
- *    - Attacker can clone UUIDs and device name
- *    - App will trust any device with matching name/UUIDs
- *    - Risk: Man-in-the-middle attack, credential theft
- * 
- * 3. NO DEVICE BINDING
- *    - App doesn't "remember" its specific physical device
- *    - No way to enforce one-device-per-user pairing
- *    - Risk: User accidentally connects to another user's device
- * 
- * RECOMMENDED SOLUTIONS FOR PRODUCTION:
- * 
- * Option A: Device-Specific UUIDs (Requires ESP32 firmware update)
- *    - Generate unique service UUID per device during first boot
- *    - Store UUID in ESP32 EEPROM/NVS (persistent)
- *    - Display UUID on OLED during pairing (QR code ideal)
- *    - User scans QR code to register device in app
- *    - App stores device UUID + optional friendly name
- *    - Pros: Strong device identity, prevents UUID collision
- *    - Cons: Requires firmware change, more complex pairing flow
- * 
- * Option B: Device Certificate/Public Key (Most Secure)
- *    - Generate unique ECDSA key pair on ESP32 first boot
- *    - Store private key securely, expose public key via BLE characteristic
- *    - App reads public key during pairing, verifies device via signature
- *    - All subsequent commands signed by device using private key
- *    - Pros: Cryptographic device identity, prevents spoofing
- *    - Cons: Requires crypto library on ESP32 (mbedtls), more complex
- * 
- * Option C: MAC Address Binding (Simpler but less secure)
- *    - Use ESP32's Bluetooth MAC address as device ID
- *    - Store MAC in app after first pairing
- *    - Verify MAC on every connection
- *    - Pros: Simple, no firmware change needed
- *    - Cons: MAC can be spoofed, privacy concerns (MAC is public)
- * 
- * Option D: User-Set Pairing Code (Balance of security and UX)
- *    - User sets permanent PIN on ESP32 via physical button sequence
- *    - PIN stored in NVS, required for ALL connections (not just session)
- *    - App stores device name + PIN hash
- *    - Challenge-response during connection (prevent replay attacks)
- *    - Pros: User control, good security with proper crypto
- *    - Cons: User must remember PIN, setup UX complexity
- * 
- * IMMEDIATE TODO (Before Production):
- * [ ] Decide on device identity strategy (recommend Option A or B)
- * [ ] Implement device pairing flow (user explicitly binds to ONE device)
- * [ ] Add device fingerprint display on ESP32 OLED
- * [ ] Store paired device identity in app (SharedPreferences or secure storage)
- * [ ] Add "unpair device" feature in app settings
- * [ ] Implement device verification on every connection
- * [ ] Add visual indicators for "trusted device" vs "unknown device"
- * [ ] Log all pairing/unpairing events in audit log
- * 
- * ENCRYPTION TODO (Step 8 in implementation plan):
- * [ ] Implement ECDH key exchange for session encryption
- * [ ] Encrypt all credential data in transit (AES-GCM)
- * [ ] Add message authentication (HMAC) to prevent tampering
- * [ ] Implement perfect forward secrecy (new session key per connection)
- * 
- * ============================================================================
- */
-

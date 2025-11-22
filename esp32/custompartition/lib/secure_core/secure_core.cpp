@@ -12,7 +12,6 @@
 // Static variables for key management
 static uint8_t runtime_key[32];
 static bool key_ready = false;
-static TaskHandle_t key_task_handle = NULL;
 
 // Derive runtime key from eFuse BLOCK3 + challenge using HMAC-SHA256
 bool derive_key_from_efuse_and_challenge(const uint8_t* challenge, size_t challenge_len, uint8_t* output_key) {
@@ -68,9 +67,9 @@ if (ret != ESP_OK) {
     return true;
 }
 
-// Key manager task - generates runtime key
-void key_manager_task(void* parameter) {
-    Serial.println("Key manager task starting...");
+// Synchronous runtime key derivation
+bool deriveRuntimeKey() {
+    Serial.println("Deriving runtime key...");
     
     // Generate a random challenge for this boot session
     uint8_t challenge[16];
@@ -83,14 +82,12 @@ void key_manager_task(void* parameter) {
     // Derive the runtime key
     if (derive_key_from_efuse_and_challenge(challenge, sizeof(challenge), runtime_key)) {
         key_ready = true;
-        Serial.println("Runtime key generation completed successfully");
+        Serial.println("Runtime key derived and ready");
+        return true;
     } else {
         Serial.println("Failed to derive runtime key");
-        // Don't set key_ready = true, system will halt
+        return false;
     }
-    
-    // Task completes - key is ready for use
-    vTaskDelete(NULL);
 }
 
 // Initialize key manager (minimal setup)
@@ -99,22 +96,6 @@ bool initKeyManager() {
     // mbedTLS is already initialized by ESP-IDF
     key_ready = false;
     return true;
-}
-
-// Start the key derivation task
-void startKeyManagerTask() {
-    Serial.println("Starting key manager task...");
-    xTaskCreate(key_manager_task, "key_mgr", 4096, NULL, 1, &key_task_handle);
-}
-
-// Wait for runtime key to be ready
-void waitForRuntimeKeyReady() {
-    Serial.println("Waiting for runtime key to be ready...");
-    while (!key_ready) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        Serial.print(".");
-    }
-    Serial.println("\nRuntime key is ready for use");
 }
 
 // Check if key is ready

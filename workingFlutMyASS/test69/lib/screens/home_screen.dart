@@ -93,6 +93,16 @@ class HomeScreen extends ConsumerWidget {
                   padding: const EdgeInsets.all(16),
                 ),
               ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () => _unpairDevice(context, notifier),
+                icon: const Icon(Icons.link_off),
+                label: const Text('Unpair Device'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.all(16),
+                  foregroundColor: Colors.red,
+                ),
+              ),
             ],
 
             // Error display
@@ -274,6 +284,54 @@ class HomeScreen extends ConsumerWidget {
 
     if (confirm == true) {
       await notifier.disconnect();
+    }
+  }
+
+  Future<void> _unpairDevice(BuildContext context, AppStateNotifier notifier) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unpair Device'),
+        content: const Text(
+          'This will remove the pairing between this phone and the ESP32.\n\n'
+          'You will need to pair again on next connection.\n\n'
+          'Are you sure?'
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Unpair'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        await notifier.unpairDevice();
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Device unpaired successfully'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to unpair: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
     }
   }
 }

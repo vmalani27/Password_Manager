@@ -1,11 +1,10 @@
 #pragma once
 #include <Arduino.h>
 
-// Key management (from your existing main.cpp)
+// Key management - synchronous initialization
 bool initKeyManager();
-bool isRuntimeKeyReady(); 
-void startKeyManagerTask();
-void waitForRuntimeKeyReady();
+bool deriveRuntimeKey();
+bool isRuntimeKeyReady();
 
 // Encryption/Decryption for password storage
 bool encrypt_password(const String& plaintext, uint8_t* ciphertext, size_t* ciphertext_len, uint8_t* iv);

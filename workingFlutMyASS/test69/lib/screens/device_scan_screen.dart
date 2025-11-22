@@ -83,13 +83,30 @@ class _DeviceScanScreenState extends ConsumerState<DeviceScanScreen> {
       final notifier = ref.read(appStateProvider.notifier);
       
       // Connect and authenticate (PIN hardcoded for now, ESP32 doesn't use it yet)
-      await notifier.connectAndAuthenticate(
+      final isNewPairing = await notifier.connectAndAuthenticate(
         deviceId: device.id,
         deviceName: device.name,
         pin: '123456',
       );
 
       if (mounted) {
+        // Show feedback based on pairing status
+        if (isNewPairing) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Device paired successfully!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Reconnected to paired device'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        
         // Success - pop back to home screen
         Navigator.pop(context);
       }

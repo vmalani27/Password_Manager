@@ -48,14 +48,14 @@ class PermissionService {
         final connectGranted = statuses[Permission.bluetoothConnect]?.isGranted ?? false;
         
         if (scanGranted && connectGranted) {
-          debugPrint('[Permissions] ✓ All permissions granted');
+          debugPrint('[Permissions] All permissions granted');
           return PermissionResult.granted;
         } else if ((statuses[Permission.bluetoothScan]?.isPermanentlyDenied ?? false) ||
                    (statuses[Permission.bluetoothConnect]?.isPermanentlyDenied ?? false)) {
-          debugPrint('[Permissions] ✗ Permissions permanently denied');
+          debugPrint('[Permissions] Permissions permanently denied');
           return PermissionResult.permanentlyDenied;
         } else {
-          debugPrint('[Permissions] ✗ Permissions denied');
+          debugPrint('[Permissions] Permissions denied');
           return PermissionResult.denied;
         }
       } else {
@@ -71,14 +71,14 @@ class PermissionService {
         final bluetoothGranted = statuses[Permission.bluetooth]?.isGranted ?? false;
         
         if (locationGranted && bluetoothGranted) {
-          debugPrint('[Permissions] ✓ All permissions granted');
+          debugPrint('[Permissions] All permissions granted');
           return PermissionResult.granted;
         } else if ((statuses[Permission.location]?.isPermanentlyDenied ?? false) ||
                    (statuses[Permission.bluetooth]?.isPermanentlyDenied ?? false)) {
-          debugPrint('[Permissions] ✗ Permissions permanently denied');
+          debugPrint('[Permissions] Permissions permanently denied');
           return PermissionResult.permanentlyDenied;
         } else {
-          debugPrint('[Permissions] ✗ Permissions denied');
+          debugPrint('[Permissions] Permissions denied');
           return PermissionResult.denied;
         }
       }
@@ -89,13 +89,13 @@ class PermissionService {
       final status = await Permission.bluetooth.request();
       
       if (status.isGranted) {
-        debugPrint('[Permissions] ✓ Bluetooth permission granted');
+        debugPrint('[Permissions] Bluetooth permission granted');
         return PermissionResult.granted;
       } else if (status.isPermanentlyDenied) {
-        debugPrint('[Permissions] ✗ Bluetooth permission permanently denied');
+        debugPrint('[Permissions] Bluetooth permission permanently denied');
         return PermissionResult.permanentlyDenied;
       } else {
-        debugPrint('[Permissions] ✗ Bluetooth permission denied');
+        debugPrint('[Permissions] Bluetooth permission denied');
         return PermissionResult.denied;
       }
     }

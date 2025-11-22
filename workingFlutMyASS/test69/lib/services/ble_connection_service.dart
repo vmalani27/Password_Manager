@@ -3,7 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import '../constants/ble_constants.dart';
 import '../models/connection_state.dart' as models;
+import '../models/paired_device.dart';
 import 'command_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Handles BLE device scanning, connection, and connection lifecycle
 /// Maps to ESP32 advertising and connection handling
@@ -23,6 +25,8 @@ class BleConnectionService {
   String? _connectedDeviceId;
   models.ConnectionState _currentState = models.ConnectionState.disconnected;
   
+  PairedDevice? _pairedDevice;
+  
   /// Stream of discovered devices during scan
   Stream<List<DiscoveredDevice>> get discoveredDevicesStream => _discoveredDevicesController.stream;
   
@@ -35,12 +39,89 @@ class BleConnectionService {
   /// Currently connected device ID
   String? get connectedDeviceId => _connectedDeviceId;
   
+  /// Currently paired device
+  PairedDevice? get pairedDevice => _pairedDevice;
+  
   /// Check if currently scanning
   bool get isScanning => _scanSubscription != null;
   
+  /// Load paired device from storage
+  Future<void> loadPairedDevice() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final deviceJson = prefs.getString('paired_device');
+      
+      if (deviceJson != null) {
+        _pairedDevice = PairedDevice.fromJson(deviceJson as Map<String, dynamic>);
+        debugPrint('[BleConnection] Loaded paired device: ${_pairedDevice?.deviceName}');
+      }
+    } catch (e) {
+      debugPrint('[BleConnection] Error loading paired device: $e');
+    }
+  }
+  
+  /// Save paired device to storage
+  Future<void> _savePairedDevice(PairedDevice device) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('paired_device', device.toJson() as String);
+      _pairedDevice = device;
+      debugPrint('[BleConnection] Saved paired device: ${device.deviceName}');
+    } catch (e) {
+      debugPrint('[BleConnection] Error saving paired device: $e');
+    }
+  }
+  
+  /// Clear paired device
+  Future<void> unpairDevice() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('paired_device');
+      _pairedDevice = null;
+      debugPrint('[BleConnection] Unpaired device');
+      
+      // Disconnect if currently connected
+      if (_connectedDeviceId != null) {
+        await disconnect();
+      }
+    } catch (e) {
+      debugPrint('[BleConnection] Error unpairing device: $e');
+    }
+  }
+  
+  /// Check if a discovered device matches the paired device
+  bool _isDeviceMatching(DiscoveredDevice device) {
+    if (_pairedDevice == null) return true; // No pairing restriction yet
+    
+    // Match by Bluetooth address (MAC)
+    return _pairedDevice!.matches(device.name, device.id);
+  }
+  
+  /// Verify device identity by reading device identity characteristic
+  /// ESP32 exposes device MAC via characteristic
+  Future<String?> _readDeviceIdentity(String deviceId) async {
+    try {
+      final characteristic = QualifiedCharacteristic(
+        serviceId: Uuid.parse(BleConstants.serviceUuid),
+        characteristicId: Uuid.parse(BleConstants.deviceIdentityCharacteristicUuid),
+        deviceId: deviceId,
+      );
+      
+      final response = await _ble.readCharacteristic(characteristic);
+      final identity = String.fromCharCodes(response);
+      
+      debugPrint('[BleConnection] Device identity: $identity');
+      return identity;
+      
+    } catch (e) {
+      debugPrint('[BleConnection] Failed to read device identity: $e');
+      return null;
+    }
+  }
+  
   /// Start scanning for ESP32 devices
-  /// ESP32 advertises with name "ESP32-GATT-Manager" and service UUID
-  /// ESP32 code: BLEDevice::getAdvertising()->addServiceUUID(SERVICE_UUID);
+  /// ESP32 advertises with name "ESP32-PWD-Manager-XXXX" and service UUID
+  /// ESP32 code: BLEDevice::init(deviceName.c_str());
   Future<void> startScan() async {
     if (_scanSubscription != null) {
       debugPrint('[BleConnection] Already scanning');
@@ -50,18 +131,21 @@ class BleConnectionService {
     _discoveredDevices.clear();
     _updateConnectionState(models.ConnectionState.scanning);
     
-    debugPrint('[BleConnection] Starting scan for ${BleConstants.expectedDeviceName}...');
+    debugPrint('[BleConnection] Starting scan for devices with prefix: ${BleConstants.deviceNamePrefix}...');
     
     _scanSubscription = _ble.scanForDevices(
       withServices: [], // Scan all devices, filter by name
       scanMode: ScanMode.lowLatency,
     ).listen(
       (device) {
-        // Filter by device name (matches ESP32: BLEDevice::init("ESP32-GATT-Manager"))
-        if (device.name == BleConstants.expectedDeviceName) {
+        // Filter by device name prefix (matches ESP32: "ESP32-PWD-Manager-XXXX")
+        if (device.name.startsWith(BleConstants.deviceNamePrefix)) {
+          // Check if device matches paired device (if any)
+          final isMatching = _isDeviceMatching(device);
+          
           // Add only if not already in list
           if (!_discoveredDevices.any((d) => d.id == device.id)) {
-            debugPrint('[BleConnection] Found device: ${device.name} (${device.id})');
+            debugPrint('[BleConnection] Found device: ${device.name} (${device.id}) ${isMatching ? "PAIRED" : ""}');
             _discoveredDevices.add(device);
             _discoveredDevicesController.add(List.from(_discoveredDevices));
           }
@@ -132,10 +216,20 @@ class BleConnectionService {
   
   /// Connect to a discovered device
   /// ESP32 accepts connection and triggers: ServerCallbacks::onConnect()
-  Future<void> connect(String deviceId) async {
+  Future<void> connect(String deviceId, {String? deviceName, bool pairDevice = false}) async {
     if (_connectedDeviceId == deviceId && _currentState.isConnected) {
       debugPrint('[BleConnection] Already connected to $deviceId');
       return;
+    }
+    
+    // Check if connecting to a different device than paired
+    if (_pairedDevice != null && !_pairedDevice!.matches(deviceName ?? '', deviceId)) {
+      debugPrint('[BleConnection] WARNING: Attempting to connect to different device than paired!');
+      debugPrint('[BleConnection] Paired: ${_pairedDevice!.deviceName} (${_pairedDevice!.bluetoothAddress})');
+      debugPrint('[BleConnection] Connecting: $deviceName ($deviceId)');
+      
+      // Optionally reject connection
+      // throw Exception('Cannot connect to unpaired device. Unpair current device first.');
     }
     
     // Disconnect from any existing connection
@@ -151,6 +245,7 @@ class BleConnectionService {
       await _connectionSubscription?.cancel();
       
       final completer = Completer<void>();
+      bool isConnecting = true;
       
       _connectionSubscription = _ble.connectToDevice(
         id: deviceId,
@@ -163,18 +258,21 @@ class BleConnectionService {
             _connectedDeviceId = deviceId;
             _updateConnectionState(models.ConnectionState.connected);
             
-            if (!completer.isCompleted) {
+            if (!completer.isCompleted && isConnecting) {
               completer.complete();
             }
             
-            debugPrint('[BleConnection] ✓ Connected to $deviceId');
+            debugPrint('[BleConnection] Connected to $deviceId');
             
           } else if (update.connectionState == DeviceConnectionState.disconnected) {
             debugPrint('[BleConnection] Disconnected from $deviceId');
-            _handleDisconnection();
             
-            if (!completer.isCompleted) {
+            // Only handle as error if we were still connecting
+            if (isConnecting && !completer.isCompleted) {
               completer.completeError(Exception('Disconnected before connection established'));
+            } else {
+              // Normal disconnect after connection was established
+              _handleDisconnection();
             }
           }
         },
@@ -186,21 +284,70 @@ class BleConnectionService {
             completer.completeError(error);
           }
         },
+        cancelOnError: false, // Keep stream alive even on errors
       );
       
       // Wait for connection to complete
       await completer.future;
+      isConnecting = false; // Mark that initial connection is done
+      
+      // Add delay to let connection stabilize before MTU negotiation
+      await Future.delayed(const Duration(milliseconds: 1000));
       
       // Now request MTU after connection is established
       // ESP32 code: BLEDevice::setMTU(256);
       debugPrint('[BleConnection] Connection established, negotiating MTU...');
-      await _requestMtu(deviceId);
-      debugPrint('[BleConnection] MTU negotiation complete');
+      try {
+        await _requestMtu(deviceId);
+        debugPrint('[BleConnection] MTU negotiation complete');
+      } catch (e) {
+        debugPrint('[BleConnection] MTU negotiation failed (non-fatal): $e');
+        // Continue anyway - MTU negotiation failure shouldn't kill connection
+      }
+      
+      // Read device identity for verification
+      String? deviceIdentity;
+      try {
+        deviceIdentity = await _readDeviceIdentity(deviceId);
+      } catch (e) {
+        debugPrint('[BleConnection] Failed to read device identity (non-fatal): $e');
+        deviceIdentity = null;
+      }
+      
+      // If pairing this device for first time
+      if (pairDevice && deviceName != null) {
+        final pairedDevice = PairedDevice(
+          deviceName: deviceName,
+          bluetoothAddress: deviceId,
+          deviceFingerprint: deviceIdentity,
+          pairedAt: DateTime.now(),
+          lastConnectedAt: DateTime.now(),
+        );
+        await _savePairedDevice(pairedDevice);
+        debugPrint('[BleConnection] Device paired: $deviceName');
+      }
+      
+      // Update last connected time for existing paired device
+      if (_pairedDevice != null && _pairedDevice!.matches(deviceName ?? '', deviceId)) {
+        final updatedDevice = PairedDevice(
+          deviceName: _pairedDevice!.deviceName,
+          bluetoothAddress: _pairedDevice!.bluetoothAddress,
+          deviceFingerprint: _pairedDevice!.deviceFingerprint,
+          pairedAt: _pairedDevice!.pairedAt,
+          lastConnectedAt: DateTime.now(),
+        );
+        await _savePairedDevice(updatedDevice);
+      }
       
     } catch (e) {
-      debugPrint('[BleConnection] ✗ Connection failed: $e');
+      debugPrint('[BleConnection] Connection failed: $e');
       _updateConnectionState(models.ConnectionState.error);
       _connectedDeviceId = null;
+      
+      // Clean up connection subscription on error
+      await _connectionSubscription?.cancel();
+      _connectionSubscription = null;
+      
       rethrow;
     }
   }

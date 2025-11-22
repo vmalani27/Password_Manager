@@ -1,7 +1,12 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:convert/convert.dart';
 import '../constants/ble_constants.dart';
+import 'ecdh_service.dart';
+import 'pairing_service.dart';
+import '../models/pairing_device.dart';
 
 /// Low-level service for sending commands and receiving responses from ESP32
 /// Handles BLE characteristic read/write operations
@@ -43,7 +48,7 @@ class CommandService {
     
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        debugPrint('[CommandService] 🔍 Discovering services (attempt $attempt/$maxAttempts)');
+        debugPrint('[CommandService] Discovering services (attempt $attempt/$maxAttempts)');
         
         final characteristic = QualifiedCharacteristic(
           serviceId: Uuid.parse(BleConstants.serviceUuid),
@@ -86,7 +91,7 @@ class CommandService {
         // If we get here without an error, subscription succeeded
         if (!completer.isCompleted) {
           _notificationSubscription = tempSubscription;
-          debugPrint('[CommandService] ✅ Service discovery successful!');
+          debugPrint('[CommandService] Service discovery successful!');
           return; // Success!
         } else {
           // completer completed with error, will be caught below
@@ -99,7 +104,7 @@ class CommandService {
         final truncatedMsg = errorMsg.length > 150 
             ? errorMsg.substring(0, 150) + '...' 
             : errorMsg;
-        debugPrint('[CommandService] ⚠️  Attempt $attempt failed: $truncatedMsg');
+        debugPrint('[CommandService] Attempt $attempt failed: $truncatedMsg');
         
         // Cancel any partial subscription
         await _notificationSubscription?.cancel();
@@ -109,7 +114,7 @@ class CommandService {
         
         // If this was the last attempt, give up
         if (attempt == maxAttempts) {
-          debugPrint('[CommandService] ❌ All $maxAttempts attempts failed. Bonding did not complete in time.');
+          debugPrint('[CommandService] All $maxAttempts attempts failed. Bonding did not complete in time.');
           throw Exception(
             'Failed to discover BLE services after $maxAttempts attempts. '
             'Bonding may have failed or timed out. Please try again.'
@@ -122,7 +127,7 @@ class CommandService {
             ? maxDelay 
             : Duration(milliseconds: delayMs);
         
-        debugPrint('[CommandService] ⏳ Waiting ${delay.inMilliseconds}ms before retry (bonding in progress)...');
+        debugPrint('[CommandService] Waiting ${delay.inMilliseconds}ms before retry (bonding in progress)...');
         await Future.delayed(delay);
       }
     }
@@ -156,7 +161,7 @@ class CommandService {
           ? responseStream.first.timeout(
               timeout ?? BleConstants.commandTimeout,
               onTimeout: () {
-                debugPrint('[CommandService] ⏱️ Timeout waiting for response to: $command');
+                debugPrint('[CommandService] Timeout waiting for response to: $command');
                 throw TimeoutException('No response from ESP32 for command: $command');
               },
             )
@@ -169,7 +174,7 @@ class CommandService {
         value: command.codeUnits,
       );
       
-      debugPrint('[CommandService] ✓ Write successful, waiting for response...');
+      debugPrint('[CommandService] Write successful, waiting for response...');
       
       if (!waitForResponse) {
         return '';
@@ -179,11 +184,11 @@ class CommandService {
       // ESP32 code: sendNotification(response);
       final response = await responseFuture;
       
-      debugPrint('[CommandService] ✓ Response: $response');
+      debugPrint('[CommandService] Response: $response');
       return response;
       
     } catch (e) {
-      debugPrint('[CommandService] ✗ Command failed: $e');
+      debugPrint('[CommandService] Command failed: $e');
       rethrow;
     }
   }
@@ -230,5 +235,220 @@ class CommandService {
   void dispose() {
     cleanup();
     _responseController.close();
+  }
+  
+  /// Perform ECDH key exchange with ESP32 (with persistent pairing support)
+  /// 
+  /// Returns a record containing:
+  /// - ecdh: The ECDH service instance with session key
+  /// - isNewPairing: true if this is a new pairing, false if reconnecting
+  /// 
+  /// Pairing Flow:
+  /// 1. Check if device is already paired
+  /// 2. If paired: Load saved keys, send pubkey, wait for ECDH_OK
+  /// 3. If not paired: Generate keys, exchange, wait for ECDH_OK_PAIRED, save pairing
+  /// 4. ESP32 may respond with ECDH_ALREADY_PAIRED if ESP32 has a different pairing
+  Future<({EcdhService ecdh, bool isNewPairing})> performEcdhHandshake(
+    String deviceId,
+    String deviceName,
+  ) async {
+    debugPrint('[ECDH] Starting handshake with device: $deviceName ($deviceId)...');
+    
+    final pairingService = PairingService();
+    final ecdh = EcdhService();
+    
+    try {
+      // Check if device is already paired
+      final isPaired = await pairingService.isPaired();
+      final pairedDevice = isPaired ? await pairingService.getPairedDevice() : null;
+      
+      // Read ESP32's public key (always needed for shared secret computation)
+      debugPrint('[ECDH] Reading ESP32 public key...');
+      final esp32PubKey = await _ble.readCharacteristic(
+        QualifiedCharacteristic(
+          serviceId: Uuid.parse(BleConstants.serviceUuid),
+          characteristicId: Uuid.parse(BleConstants.ecdhCharacteristicUuid),
+          deviceId: deviceId,
+        ),
+      );
+      debugPrint('[ECDH] Read ESP32 public key: ${esp32PubKey.length} bytes');
+      
+      Uint8List clientPubKey;
+      
+      if (isPaired && pairedDevice != null && pairedDevice.deviceId == deviceId) {
+        // Reconnecting to paired device - load saved keys
+        debugPrint('[ECDH] Device is paired, loading saved keys...');
+        ecdh.loadKeyPair(
+          Uint8List.fromList(pairedDevice.clientPrivateKey),
+          Uint8List.fromList(pairedDevice.clientPublicKey),
+        );
+        clientPubKey = Uint8List.fromList(pairedDevice.clientPublicKey);
+        
+      } else if (isPaired && pairedDevice != null && pairedDevice.deviceId != deviceId) {
+        // Trying to connect to different device while paired to another
+        throw Exception(
+          'Already paired to device "${pairedDevice.deviceName}". '
+          'Unpair first before connecting to a different device.'
+        );
+        
+      } else {
+        // First time pairing - generate new keys
+        debugPrint('[ECDH] First time pairing, generating new keys...');
+        ecdh.generateKeyPair();
+        clientPubKey = ecdh.getPublicKeyBytes();
+      }
+      
+      // Compute shared secret (for both new pairing and reconnection)
+      debugPrint('[ECDH] Computing shared secret...');
+      ecdh.computeSharedSecret(Uint8List.fromList(esp32PubKey));
+      
+      // Start listening for ECDH response BEFORE sending public key
+      debugPrint('[ECDH] Setting up listener for ECDH response...');
+      final completer = Completer<String>();
+      late StreamSubscription<String> subscription;
+      
+      subscription = responseStream.listen((response) {
+        if (!completer.isCompleted) {
+          debugPrint('[ECDH] Received notification: $response');
+          completer.complete(response);
+          subscription.cancel();
+        }
+      });
+      
+      // Set timeout
+      Future.delayed(Duration(seconds: 5), () {
+        if (!completer.isCompleted) {
+          subscription.cancel();
+          completer.completeError(TimeoutException('No ECDH response from ESP32'));
+        }
+      });
+      
+      // Send our public key to ESP32
+      debugPrint('[ECDH] Sending client public key...');
+      await _ble.writeCharacteristicWithoutResponse(
+        QualifiedCharacteristic(
+          serviceId: Uuid.parse(BleConstants.serviceUuid),
+          characteristicId: Uuid.parse(BleConstants.ecdhCharacteristicUuid),
+          deviceId: deviceId,
+        ),
+        value: clientPubKey,
+      );
+      
+      debugPrint('[ECDH] Write complete, waiting for ECDH response...');
+      
+      // Wait for ECDH response
+      final response = await completer.future;
+      
+      // Handle different response types
+      if (response == Esp32Commands.ecdhOk) {
+        // Reconnection successful
+        debugPrint('[ECDH] Received ECDH_OK - reconnection successful!');
+        return (ecdh: ecdh, isNewPairing: false);
+        
+      } else if (response == Esp32Commands.ecdhOkPaired) {
+        // New pairing successful - save pairing data
+        debugPrint('[ECDH] Received ECDH_OK_PAIRED - new pairing established!');
+        
+        final pairedDevice = PairedDevice(
+          deviceId: deviceId,
+          deviceName: deviceName,
+          clientPrivateKey: ecdh.getPrivateKeyBytes(),
+          clientPublicKey: clientPubKey,
+          esp32PublicKey: Uint8List.fromList(esp32PubKey),
+          pairedAt: DateTime.now(),
+        );
+        
+        await pairingService.savePairing(pairedDevice);
+        
+        debugPrint('[ECDH] Pairing saved to persistent storage');
+        return (ecdh: ecdh, isNewPairing: true);
+        
+      } else if (response == Esp32Commands.ecdhAlreadyPaired) {
+        // ESP32 is paired with a different device
+        throw Exception(
+          'ESP32 is already paired with a different device. '
+          'Unpair the ESP32 first using the device button.'
+        );
+        
+      } else {
+        throw Exception('Unexpected ECDH response: $response');
+      }
+      
+    } catch (e) {
+      debugPrint('[ECDH] Handshake failed: $e');
+      ecdh.clear();
+      rethrow;
+    }
+  }
+  
+  /// Unpair from the current device
+  /// Sends unpair command to ESP32 and removes local pairing data
+  Future<void> unpairDevice() async {
+    try {
+      debugPrint('[ECDH] Sending unpair command...');
+      final response = await sendCommand(Esp32Commands.unpair);
+      
+      if (response != Esp32Commands.unpaired) {
+        debugPrint('[ECDH] Unexpected unpair response: $response');
+      } else {
+        debugPrint('[ECDH] ESP32 confirmed unpaired');
+      }
+      
+      // Remove local pairing data regardless of ESP32 response
+      final pairingService = PairingService();
+      await pairingService.removePairing();
+      debugPrint('[ECDH] Local pairing data removed');
+      
+    } catch (e) {
+      debugPrint('[ECDH] Unpair error: $e');
+      // Still try to remove local data even if ESP32 command fails
+      final pairingService = PairingService();
+      await pairingService.removePairing();
+      rethrow;
+    }
+  }
+  
+  /// Authenticate using ECDH challenge-response
+  Future<bool> authenticateWithEcdh(EcdhService ecdh) async {
+    try {
+      debugPrint('[ECDH Auth] Requesting challenge...');
+      
+      // 1. Request challenge
+      final response = await sendCommand(Esp32Commands.ecdhAuth);
+      
+      // 2. Parse challenge response
+      // Format: "CHALLENGE <32-char-hex>"
+      if (!response.startsWith(Esp32Commands.challengePrefix)) {
+        debugPrint('[ECDH Auth] Expected challenge, got: $response');
+        return false;
+      }
+      
+      final challengeHex = response.substring(Esp32Commands.challengePrefix.length).trim();
+      debugPrint('[ECDH Auth] Received challenge: $challengeHex');
+      
+      // 3. Convert challenge from hex to bytes
+      final challengeBytes = Uint8List.fromList(hex.decode(challengeHex));
+      
+      // 4. Compute HMAC response
+      final hmacBytes = ecdh.computeHmac(challengeBytes);
+      final hmacHex = hex.encode(hmacBytes);
+      debugPrint('[ECDH Auth] Computed HMAC: $hmacHex');
+      
+      // 5. Send response
+      final authResult = await sendCommand(Esp32Commands.respond(hmacHex));
+      
+      // 6. Check result: AUTH OK or AUTH FAIL
+      if (authResult == Esp32Commands.authOk) {
+        debugPrint('[ECDH Auth] Authentication successful!');
+        return true;
+      } else {
+        debugPrint('[ECDH Auth] Authentication failed: $authResult');
+        return false;
+      }
+      
+    } catch (e) {
+      debugPrint('[ECDH Auth] Error: $e');
+      return false;
+    }
   }
 }

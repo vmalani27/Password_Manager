@@ -30,17 +30,17 @@ class CredentialService {
       
       // Parse response: "Added" or "ADD FAIL"
       if (response.contains(Esp32Commands.added)) {
-        debugPrint('[Credential] ✓ Added successfully');
+        debugPrint('[Credential] Added successfully');
         return true;
       } else if (response.contains(Esp32Commands.addFail)) {
-        debugPrint('[Credential] ✗ Add failed');
+        debugPrint('[Credential] Add failed');
         return false;
       } else {
         throw Exception('Unexpected add response: $response');
       }
       
     } catch (e) {
-      debugPrint('[Credential] ✗ Add error: $e');
+      debugPrint('[Credential] Add error: $e');
       rethrow;
     }
   }
@@ -63,7 +63,7 @@ class CredentialService {
       // Parse response: "Password: xyz" or "NOT FOUND"
       if (response.startsWith(Esp32Commands.passwordPrefix)) {
         final password = response.substring(Esp32Commands.passwordPrefix.length).trim();
-        debugPrint('[Credential] ✓ Password retrieved');
+        debugPrint('[Credential] Password retrieved');
         return password;
       } else if (response.contains(Esp32Commands.notFound)) {
         debugPrint('[Credential] Credential not found');
@@ -73,7 +73,7 @@ class CredentialService {
       }
       
     } catch (e) {
-      debugPrint('[Credential] ✗ Get error: $e');
+      debugPrint('[Credential] Get error: $e');
       rethrow;
     }
   }
@@ -95,17 +95,17 @@ class CredentialService {
       
       // Parse response: "Updated" or "UPDATE FAIL"
       if (response.contains(Esp32Commands.updated)) {
-        debugPrint('[Credential] ✓ Updated successfully');
+        debugPrint('[Credential] Updated successfully');
         return true;
       } else if (response.contains(Esp32Commands.updateFail)) {
-        debugPrint('[Credential] ✗ Update failed');
+        debugPrint('[Credential] Update failed');
         return false;
       } else {
         throw Exception('Unexpected update response: $response');
       }
       
     } catch (e) {
-      debugPrint('[Credential] ✗ Update error: $e');
+      debugPrint('[Credential] Update error: $e');
       rethrow;
     }
   }
@@ -127,17 +127,17 @@ class CredentialService {
       
       // Parse response: "Deleted" or "DELETE FAIL"
       if (response.contains(Esp32Commands.deleted)) {
-        debugPrint('[Credential] ✓ Deleted successfully');
+        debugPrint('[Credential] Deleted successfully');
         return true;
       } else if (response.contains(Esp32Commands.deleteFail)) {
-        debugPrint('[Credential] ✗ Delete failed');
+        debugPrint('[Credential] Delete failed');
         return false;
       } else {
         throw Exception('Unexpected delete response: $response');
       }
       
     } catch (e) {
-      debugPrint('[Credential] ✗ Delete error: $e');
+      debugPrint('[Credential] Delete error: $e');
       rethrow;
     }
   }
@@ -154,17 +154,27 @@ class CredentialService {
         timeout: BleConstants.commandTimeout,
       );
       
-      // Parse response: "LIST:\n<credentials>"
-      if (!response.startsWith(Esp32Commands.listPrefix)) {
+      // ESP32 sends: "LIST:\n(none)" or "LIST:\ncredential data"
+      // Check for both literal "\n" and actual newline
+      if (!response.startsWith('LIST:')) {
         throw Exception('Unexpected list response: $response');
       }
       
-      // Extract credential lines
-      final content = response.substring(Esp32Commands.listPrefix.length).trim();
+      // Extract content after "LIST:" and first newline/separator
+      String content;
+      if (response.contains('\n')) {
+        // Actual newline
+        content = response.substring(response.indexOf('\n') + 1).trim();
+      } else if (response.contains('\\n')) {
+        // Literal \n
+        content = response.substring(response.indexOf('\\n') + 2).trim();
+      } else {
+        content = response.substring(5).trim(); // Just remove "LIST:"
+      }
       
-      // Handle empty list
+      // Handle empty list - ESP32 sends "(none)" when no credentials exist
       if (content.isEmpty || content == '(none)') {
-        debugPrint('[Credential] ✓ No credentials found');
+        debugPrint('[Credential] No credentials found');
         return [];
       }
       
@@ -180,15 +190,14 @@ class CredentialService {
           credentials.add(credential);
         } catch (e) {
           debugPrint('[Credential] Warning: Failed to parse line: $line - $e');
-          // Continue parsing other lines
         }
       }
       
-      debugPrint('[Credential] ✓ Retrieved ${credentials.length} credential(s)');
+      debugPrint('[Credential] Retrieved ${credentials.length} credential(s)');
       return credentials;
       
     } catch (e) {
-      debugPrint('[Credential] ✗ List error: $e');
+      debugPrint('[Credential] List error: $e');
       rethrow;
     }
   }

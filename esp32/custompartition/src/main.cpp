@@ -9,6 +9,12 @@
 #include <Adafruit_SSD1306.h>
 #include <vector>
 #include <secure_core.h>
+#include "mbedtls/ecdh.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/md.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 extern "C" {
   #include "sqlite3.h"
@@ -23,6 +29,7 @@ extern "C" {
 #define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  
 #define NOTIFICATION_CHARACTERISTIC_UUID "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define ECDH_PUBLIC_KEY_CHARACTERISTIC_UUID "6E400005-B5A3-F393-E0A9-E50E24DCCA9E"
 #define SD_CS 5
 
 // Global variables from oldcode.ino
@@ -45,6 +52,34 @@ const int MAX_FAILED_ATTEMPTS = 5;
 unsigned long lockoutUntilMs = 0;
 const unsigned long LOCKOUT_DURATION_MS = 60UL * 1000UL;
 
+// ECDH state variables
+uint8_t esp32_private_key[32];
+uint8_t esp32_public_key[64];
+uint8_t client_public_key[64];
+uint8_t shared_secret[32];
+uint8_t session_aes_key[32];
+bool ecdh_ready = false;
+uint8_t pending_challenge[16];
+bool challenge_pending = false;
+
+BLECharacteristic* pEcdhCharacteristic = nullptr;
+
+// Device binding state
+#define NVS_NAMESPACE "pwmgr"
+#define NVS_KEY_ESP_PRIVATE "esp_priv"
+#define NVS_KEY_ESP_PUBLIC "esp_pub"
+#define NVS_KEY_CLIENT_PUBLIC "client_pub"
+#define NVS_KEY_PAIRED "paired"
+
+typedef enum {
+    PAIRING_STATE_UNPAIRED = 0,
+    PAIRING_STATE_PAIRED = 1
+} pairing_state_t;
+
+pairing_state_t pairing_state = PAIRING_STATE_UNPAIRED;
+uint8_t stored_client_public_key[64];
+bool has_stored_client_key = false;
+
 // Function prototypes
 void updateOutput(const String &msg);
 void sendNotification(const String &data);
@@ -56,6 +91,396 @@ String getPassword(const String &site, const String &username);
 String listCredentials();
 void auditLog(const String &event, const String &user);
 void handleCommand(String cmdLine);
+bool initECDH();
+bool computeSharedSecret(const uint8_t* client_pubkey);
+void clearECDH();
+bool loadOrGenerateKeys();
+bool savePairing(const uint8_t* client_pubkey_to_save);
+bool unpairDevice();
+bool isDevicePaired();
+
+// ============================================================================
+// ECDH IMPLEMENTATION
+// ============================================================================
+
+// Initialize ECDH and generate ESP32's key pair
+bool initECDH() {
+    mbedtls_ecdh_context ecdh_ctx;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    
+    mbedtls_ecdh_init(&ecdh_ctx);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    
+    const char* pers = "ecdh_esp32";
+    int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                     (const unsigned char*)pers, strlen(pers));
+    if (ret != 0) {
+        Serial.printf("ECDH: RNG seed failed: %d\n", ret);
+        return false;
+    }
+    
+    // Use secp256r1 (NIST P-256) curve
+    ret = mbedtls_ecp_group_load(&ecdh_ctx.grp, MBEDTLS_ECP_DP_SECP256R1);
+    if (ret != 0) {
+        Serial.printf("ECDH: Curve load failed: %d\n", ret);
+        return false;
+    }
+    
+    // Generate our key pair
+    ret = mbedtls_ecdh_gen_public(&ecdh_ctx.grp, &ecdh_ctx.d, 
+                                   &ecdh_ctx.Q, mbedtls_ctr_drbg_random, &ctr_drbg);
+    if (ret != 0) {
+        Serial.printf("ECDH: Key generation failed: %d\n", ret);
+        return false;
+    }
+    
+    // Export private key
+    ret = mbedtls_mpi_write_binary(&ecdh_ctx.d, esp32_private_key, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: Private key export failed: %d\n", ret);
+        return false;
+    }
+    
+    // Export public key (X, Y coordinates - 32 bytes each)
+    ret = mbedtls_mpi_write_binary(&ecdh_ctx.Q.X, esp32_public_key, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: Public key X export failed: %d\n", ret);
+        return false;
+    }
+    
+    ret = mbedtls_mpi_write_binary(&ecdh_ctx.Q.Y, esp32_public_key + 32, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: Public key Y export failed: %d\n", ret);
+        return false;
+    }
+    
+    mbedtls_ecdh_free(&ecdh_ctx);
+    mbedtls_entropy_free(&entropy);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    
+    Serial.println("ECDH: Key pair generated successfully");
+    Serial.print("ECDH: Public key (hex): ");
+    for (int i = 0; i < 64; i++) {
+        Serial.printf("%02X", esp32_public_key[i]);
+    }
+    Serial.println();
+    
+    return true;
+}
+
+// Compute shared secret from client's public key
+bool computeSharedSecret(const uint8_t* client_pubkey) {
+    mbedtls_ecdh_context ecdh_ctx;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    
+    mbedtls_ecdh_init(&ecdh_ctx);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    
+    const char* pers = "ecdh_shared";
+    int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                     (const unsigned char*)pers, strlen(pers));
+    if (ret != 0) {
+        Serial.printf("ECDH: RNG seed failed: %d\n", ret);
+        return false;
+    }
+    
+    // Load curve
+    ret = mbedtls_ecp_group_load(&ecdh_ctx.grp, MBEDTLS_ECP_DP_SECP256R1);
+    if (ret != 0) {
+        Serial.printf("ECDH: Curve load failed: %d\n", ret);
+        return false;
+    }
+    
+    // Load our private key
+    ret = mbedtls_mpi_read_binary(&ecdh_ctx.d, esp32_private_key, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: Private key import failed: %d\n", ret);
+        return false;
+    }
+    
+    // Load client's public key (X, Y coordinates)
+    ret = mbedtls_mpi_read_binary(&ecdh_ctx.Qp.X, client_pubkey, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: Client public key X import failed: %d\n", ret);
+        return false;
+    }
+    
+    ret = mbedtls_mpi_read_binary(&ecdh_ctx.Qp.Y, client_pubkey + 32, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: Client public key Y import failed: %d\n", ret);
+        return false;
+    }
+    
+    ret = mbedtls_mpi_lset(&ecdh_ctx.Qp.Z, 1);
+    if (ret != 0) {
+        Serial.printf("ECDH: Client public key Z set failed: %d\n", ret);
+        return false;
+    }
+    
+    // Compute shared secret
+    size_t olen;
+    ret = mbedtls_ecdh_calc_secret(&ecdh_ctx, &olen, shared_secret, 32,
+                                    mbedtls_ctr_drbg_random, &ctr_drbg);
+    if (ret != 0) {
+        Serial.printf("ECDH: Shared secret computation failed: %d\n", ret);
+        return false;
+    }
+    
+    Serial.printf("ECDH: Shared secret computed (%d bytes)\n", olen);
+    
+    // Derive session AES key using HKDF-like approach (manual implementation)
+    // HKDF-Extract: PRK = HMAC-SHA256(salt, shared_secret)
+    uint8_t prk[32];
+    mbedtls_md_context_t hkdf_ctx;
+    mbedtls_md_init(&hkdf_ctx);
+    
+    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    const uint8_t salt[16] = {'B','L','E','_','P','A','S','S','W','O','R','D','_','M','G','R'};
+    
+    ret = mbedtls_md_setup(&hkdf_ctx, md, 1);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC setup failed: %d\n", ret);
+        return false;
+    }
+    
+    ret = mbedtls_md_hmac_starts(&hkdf_ctx, salt, 16);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC start failed: %d\n", ret);
+        mbedtls_md_free(&hkdf_ctx);
+        return false;
+    }
+    
+    ret = mbedtls_md_hmac_update(&hkdf_ctx, shared_secret, olen);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC update failed: %d\n", ret);
+        mbedtls_md_free(&hkdf_ctx);
+        return false;
+    }
+    
+    ret = mbedtls_md_hmac_finish(&hkdf_ctx, prk);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC finish failed: %d\n", ret);
+        mbedtls_md_free(&hkdf_ctx);
+        return false;
+    }
+    
+    // HKDF-Expand: session_key = HMAC-SHA256(prk, info || 0x01)
+    const uint8_t info[8] = {'S','E','S','S','I','O','N', 0x01};
+    
+    ret = mbedtls_md_hmac_starts(&hkdf_ctx, prk, 32);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC expand start failed: %d\n", ret);
+        mbedtls_md_free(&hkdf_ctx);
+        return false;
+    }
+    
+    ret = mbedtls_md_hmac_update(&hkdf_ctx, info, 8);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC expand update failed: %d\n", ret);
+        mbedtls_md_free(&hkdf_ctx);
+        return false;
+    }
+    
+    ret = mbedtls_md_hmac_finish(&hkdf_ctx, session_aes_key);
+    if (ret != 0) {
+        Serial.printf("ECDH: HMAC expand finish failed: %d\n", ret);
+        mbedtls_md_free(&hkdf_ctx);
+        return false;
+    }
+    
+    mbedtls_md_free(&hkdf_ctx);
+    
+    Serial.println("ECDH: Session key derived successfully");
+    
+    // Zero out shared secret (only keep derived key)
+    memset(shared_secret, 0, sizeof(shared_secret));
+    
+    ecdh_ready = true;
+    
+    mbedtls_ecdh_free(&ecdh_ctx);
+    mbedtls_entropy_free(&entropy);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    
+    return true;
+}
+
+// Clear ECDH session state on disconnect (but preserve NVS pairing data)
+void clearECDH() {
+    memset(client_public_key, 0, sizeof(client_public_key));
+    memset(shared_secret, 0, sizeof(shared_secret));
+    memset(session_aes_key, 0, sizeof(session_aes_key));
+    ecdh_ready = false;
+    challenge_pending = false;
+    Serial.println("ECDH: Session state cleared");
+}
+
+// ============================================================================
+// NVS DEVICE BINDING FUNCTIONS
+// ============================================================================
+
+// Load persistent keys from NVS or generate new ones if unpaired
+bool loadOrGenerateKeys() {
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+    
+    nvs_handle_t nvs_handle;
+    err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        Serial.printf("NVS: Failed to open namespace: %d\n", err);
+        return false;
+    }
+    
+    // Check if device is paired
+    uint8_t paired = 0;
+    err = nvs_get_u8(nvs_handle, NVS_KEY_PAIRED, &paired);
+    if (err == ESP_OK && paired == 1) {
+        // Device is paired - load keys from NVS
+        pairing_state = PAIRING_STATE_PAIRED;
+        
+        size_t key_size = 32;
+        err = nvs_get_blob(nvs_handle, NVS_KEY_ESP_PRIVATE, esp32_private_key, &key_size);
+        if (err != ESP_OK || key_size != 32) {
+            Serial.println("NVS: Failed to load ESP32 private key");
+            nvs_close(nvs_handle);
+            return false;
+        }
+        
+        key_size = 64;
+        err = nvs_get_blob(nvs_handle, NVS_KEY_ESP_PUBLIC, esp32_public_key, &key_size);
+        if (err != ESP_OK || key_size != 64) {
+            Serial.println("NVS: Failed to load ESP32 public key");
+            nvs_close(nvs_handle);
+            return false;
+        }
+        
+        key_size = 64;
+        err = nvs_get_blob(nvs_handle, NVS_KEY_CLIENT_PUBLIC, stored_client_public_key, &key_size);
+        if (err == ESP_OK && key_size == 64) {
+            has_stored_client_key = true;
+            Serial.println("NVS: Loaded paired device keys");
+        } else {
+            Serial.println("NVS: Warning - paired state but no client key found");
+            has_stored_client_key = false;
+        }
+        
+        nvs_close(nvs_handle);
+        Serial.println("NVS: Device is PAIRED - keys loaded from storage");
+        return true;
+        
+    } else {
+        // Device is unpaired - generate new ephemeral keys
+        pairing_state = PAIRING_STATE_UNPAIRED;
+        has_stored_client_key = false;
+        nvs_close(nvs_handle);
+        
+        Serial.println("NVS: Device is UNPAIRED - generating new keys");
+        return initECDH();
+    }
+}
+
+// Save pairing to NVS after successful ECDH handshake
+bool savePairing(const uint8_t* client_pubkey_to_save) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        Serial.printf("NVS: Failed to open namespace for pairing: %d\n", err);
+        return false;
+    }
+    
+    // Save ESP32 keys
+    err = nvs_set_blob(nvs_handle, NVS_KEY_ESP_PRIVATE, esp32_private_key, 32);
+    if (err != ESP_OK) {
+        Serial.println("NVS: Failed to save ESP32 private key");
+        nvs_close(nvs_handle);
+        return false;
+    }
+    
+    err = nvs_set_blob(nvs_handle, NVS_KEY_ESP_PUBLIC, esp32_public_key, 64);
+    if (err != ESP_OK) {
+        Serial.println("NVS: Failed to save ESP32 public key");
+        nvs_close(nvs_handle);
+        return false;
+    }
+    
+    // Save client public key
+    err = nvs_set_blob(nvs_handle, NVS_KEY_CLIENT_PUBLIC, client_pubkey_to_save, 64);
+    if (err != ESP_OK) {
+        Serial.println("NVS: Failed to save client public key");
+        nvs_close(nvs_handle);
+        return false;
+    }
+    
+    // Mark as paired
+    err = nvs_set_u8(nvs_handle, NVS_KEY_PAIRED, 1);
+    if (err != ESP_OK) {
+        Serial.println("NVS: Failed to set paired flag");
+        nvs_close(nvs_handle);
+        return false;
+    }
+    
+    // Commit changes
+    err = nvs_commit(nvs_handle);
+    if (err != ESP_OK) {
+        Serial.println("NVS: Failed to commit pairing");
+        nvs_close(nvs_handle);
+        return false;
+    }
+    
+    nvs_close(nvs_handle);
+    
+    // Update runtime state
+    pairing_state = PAIRING_STATE_PAIRED;
+    memcpy(stored_client_public_key, client_pubkey_to_save, 64);
+    has_stored_client_key = true;
+    
+    Serial.println("NVS: Device pairing saved successfully");
+    return true;
+}
+
+// Unpair device (factory reset for pairing)
+bool unpairDevice() {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        Serial.printf("NVS: Failed to open namespace for unpair: %d\n", err);
+        return false;
+    }
+    
+    // Erase all pairing data
+    nvs_erase_key(nvs_handle, NVS_KEY_ESP_PRIVATE);
+    nvs_erase_key(nvs_handle, NVS_KEY_ESP_PUBLIC);
+    nvs_erase_key(nvs_handle, NVS_KEY_CLIENT_PUBLIC);
+    nvs_erase_key(nvs_handle, NVS_KEY_PAIRED);
+    
+    err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    
+    // Clear runtime state
+    pairing_state = PAIRING_STATE_UNPAIRED;
+    has_stored_client_key = false;
+    memset(esp32_private_key, 0, sizeof(esp32_private_key));
+    memset(esp32_public_key, 0, sizeof(esp32_public_key));
+    memset(stored_client_public_key, 0, sizeof(stored_client_public_key));
+    clearECDH();
+    
+    Serial.println("NVS: Device unpaired - all pairing data erased");
+    
+    // Generate new ephemeral keys for next pairing
+    return initECDH();
+}
+
+// Check if device is paired
+bool isDevicePaired() {
+    return (pairing_state == PAIRING_STATE_PAIRED);
+}
 
 // BLE callback classes (moved to top for proper declaration)
 class MySecurityCallbacks : public BLESecurityCallbacks {
@@ -102,6 +527,60 @@ class CommandCallback : public BLECharacteristicCallbacks {
   }
 };
 
+class EcdhCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    std::string rxValue = pCharacteristic->getValue();
+    
+    if (rxValue.length() == 64) {
+      Serial.println("ECDH: Received client public key");
+      
+      // Check if device is already paired
+      if (isDevicePaired()) {
+        // Verify this is the paired device
+        if (has_stored_client_key && memcmp(rxValue.c_str(), stored_client_public_key, 64) == 0) {
+          Serial.println("ECDH: Recognized paired device");
+          memcpy(client_public_key, rxValue.c_str(), 64);
+          
+          // Compute shared secret with stored keys
+          if (computeSharedSecret(client_public_key)) {
+            sendNotification("ECDH_OK");
+            Serial.println("ECDH: Paired device authenticated");
+          } else {
+            sendNotification("ECDH_FAIL");
+            Serial.println("ECDH: Paired device auth failed");
+          }
+        } else {
+          // Different device trying to connect
+          Serial.println("ECDH: Rejected - device already paired to another client");
+          sendNotification("ECDH_ALREADY_PAIRED");
+        }
+      } else {
+        // Device is unpaired - accept new pairing
+        Serial.println("ECDH: New pairing initiated");
+        memcpy(client_public_key, rxValue.c_str(), 64);
+        
+        // Compute shared secret
+        if (computeSharedSecret(client_public_key)) {
+          // Save pairing to NVS
+          if (savePairing(client_public_key)) {
+            sendNotification("ECDH_OK_PAIRED");
+            Serial.println("ECDH: New device paired successfully");
+          } else {
+            sendNotification("ECDH_OK");
+            Serial.println("ECDH: Handshake OK but pairing save failed");
+          }
+        } else {
+          sendNotification("ECDH_FAIL");
+          Serial.println("ECDH: Handshake failed");
+        }
+      }
+    } else {
+      Serial.printf("ECDH: Invalid key length: %d\n", rxValue.length());
+      sendNotification("ECDH_INVALID");
+    }
+  }
+};
+
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* server) {
     updateOutput("Client connected.");
@@ -114,6 +593,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     sessionAuthorized = false;
     sessionToken = "";
     wasConnected = false;
+    clearECDH(); // Clear ECDH state
     updateOutput("Session cleared on disconnect.");
   }
 };
@@ -319,9 +799,89 @@ void handleCommand(String cmdLine) {
     return;
   }
 
-  // If not authorized, only 'request_token' or 'auth <token>' allowed
+  // If not authorized, only 'request_token', 'auth <token>', or ECDH auth allowed
   if (!sessionAuthorized) {
-    if (cmd.equalsIgnoreCase("request_token")) {
+    // ECDH challenge-response authentication
+    if (cmd.equalsIgnoreCase("ecdh_auth")) {
+      if (!ecdh_ready) {
+        sendNotification("ECDH NOT READY");
+        updateOutput("ECDH auth requested but ECDH not ready");
+        return;
+      }
+      
+      // Generate 16-byte challenge
+      for (int i = 0; i < 16; i++) {
+        pending_challenge[i] = esp_random() & 0xFF;
+      }
+      
+      // Send challenge to client as hex
+      String challengeHex = "";
+      for (int i = 0; i < 16; i++) {
+        char buf[3];
+        sprintf(buf, "%02X", pending_challenge[i]);
+        challengeHex += buf;
+      }
+      sendNotification("CHALLENGE " + challengeHex);
+      challenge_pending = true;
+      updateOutput("ECDH: Challenge sent");
+      return;
+    }
+    else if (cmd.equalsIgnoreCase("respond") && tokens.size() == 2) {
+      if (!challenge_pending) {
+        sendNotification("NO CHALLENGE");
+        updateOutput("Response received but no challenge pending");
+        return;
+      }
+      
+      // Client sends: "respond <HMAC_hex>"
+      String responseHex = tokens[1];
+      if (responseHex.length() != 64) { // 32 bytes = 64 hex chars
+        sendNotification("INVALID RESPONSE");
+        updateOutput("Invalid response length: " + String(responseHex.length()));
+        return;
+      }
+      
+      // Convert hex to bytes
+      uint8_t client_hmac[32];
+      for (int i = 0; i < 32; i++) {
+        sscanf(responseHex.substring(i*2, i*2+2).c_str(), "%02hhx", &client_hmac[i]);
+      }
+      
+      // Compute expected HMAC(session_key, challenge)
+      uint8_t expected_hmac[32];
+      mbedtls_md_context_t ctx;
+      mbedtls_md_init(&ctx);
+      
+      const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+      mbedtls_md_setup(&ctx, info, 1);
+      mbedtls_md_hmac_starts(&ctx, session_aes_key, 32);
+      mbedtls_md_hmac_update(&ctx, pending_challenge, 16);
+      mbedtls_md_hmac_finish(&ctx, expected_hmac);
+      mbedtls_md_free(&ctx);
+      
+      // Compare
+      if (memcmp(client_hmac, expected_hmac, 32) == 0) {
+        sessionAuthorized = true;
+        challenge_pending = false;
+        failedAuthAttempts = 0;
+        updateOutput("ECDH Auth: Success");
+        sendNotification("AUTH OK");
+        auditLog("ECDH_AUTH_SUCCESS", "ecdh_client");
+      } else {
+        failedAuthAttempts++;
+        updateOutput("ECDH Auth: Invalid response (" + String(failedAuthAttempts) + ")");
+        sendNotification("AUTH FAIL");
+        auditLog("ECDH_AUTH_FAIL", "unknown");
+        if (failedAuthAttempts >= MAX_FAILED_ATTEMPTS) {
+          lockoutUntilMs = millis() + LOCKOUT_DURATION_MS;
+          failedAuthAttempts = 0;
+          updateOutput("Locked out for 1 minute");
+        }
+      }
+      return;
+    }
+    // Legacy token-based auth (for backward compatibility)
+    else if (cmd.equalsIgnoreCase("request_token")) {
       sessionToken = generateSessionToken();
       updateOutput("Generated token: " + sessionToken);
       sendNotification("TOKEN " + sessionToken);
@@ -333,7 +893,7 @@ void handleCommand(String cmdLine) {
       if (provided == sessionToken && sessionToken.length() > 0) {
         sessionAuthorized = true;
         failedAuthAttempts = 0;
-        updateOutput("AUTH OK");
+        updateOutput("AUTH OK (legacy token)");
         sendNotification("AUTH OK");
         auditLog("AUTH_SUCCESS", "paired_client");
       } else {
@@ -406,6 +966,25 @@ void handleCommand(String cmdLine) {
     return;
   }
 
+  if (cmd.equalsIgnoreCase("unpair")) {
+    // Unpair device (requires authorization)
+    if (unpairDevice()) {
+      sessionAuthorized = false;
+      sessionToken = "";
+      updateOutput("Device unpaired");
+      sendNotification("UNPAIRED");
+      auditLog("UNPAIR", "client");
+      // Restart advertising for new pairing
+      if (pServer) {
+        pServer->getAdvertising()->start();
+      }
+    } else {
+      updateOutput("Unpair failed");
+      sendNotification("UNPAIR_FAIL");
+    }
+    return;
+  }
+
   if (cmd.equalsIgnoreCase("logout")) {
     sessionAuthorized = false;
     sessionToken = "";
@@ -424,31 +1003,20 @@ void setup() {
   delay(1000);
   Serial.println("\n\n=== ESP32 Password Manager Starting ===");
 
-  // Initialize security system FIRST
+  // Initialize security system FIRST (SYNCHRONOUS)
   Serial.println("Initializing key manager...");
   if (!initKeyManager()) {
     Serial.println("ERROR: Key manager init failed!");
     while(1) delay(1000);
   }
   
-  Serial.println("Starting key manager task...");
-  startKeyManagerTask();
-  
-  Serial.println("Waiting for runtime key to be ready...");
-  waitForRuntimeKeyReady();
-  Serial.println("Runtime key generation completed successfully");
-
-
-  
-  // SD init
-  SPI.begin(18, 19, 23, 5);  // SCK, MISO, MOSI, CS
-
-  Serial.println("Initializing SD card...");
-  if (!SD.begin(5, SPI, 8000000)) { // 8 MHz safe speed
-    // updateOutput("SD init failed.");
-    Serial.println("ERROR: SD card initialization failed");
-    while (true) delay(1000);
+  Serial.println("Deriving runtime encryption key...");
+  if (!deriveRuntimeKey()) {
+    Serial.println("ERROR: Runtime key derivation failed!");
+    while(1) delay(1000);
   }
+  Serial.println("Runtime key ready");
+
   // Initialize display
   Serial.println("Initializing OLED display...");
   Wire.begin();
@@ -465,6 +1033,14 @@ void setup() {
   display.println(F("Initializing..."));
   display.display();
 
+  // SD init
+  SPI.begin(18, 19, 23, 5);  // SCK, MISO, MOSI, CS
+  Serial.println("Initializing SD card...");
+  if (!SD.begin(5, SPI, 8000000)) {
+    updateOutput("SD init failed.");
+    Serial.println("ERROR: SD card initialization failed");
+    while (true) delay(1000);
+  }
   updateOutput("SD initialized.");
   Serial.println("SD card initialized successfully");
   delay(200);
@@ -583,6 +1159,30 @@ void setup() {
   pCharacteristic->addDescriptor(new BLE2902());
   pCharacteristic->setValue("Ready");
   
+  // ECDH characteristic (read for ESP32 public key, write for client public key)
+  Serial.println("Creating ECDH characteristic...");
+  pEcdhCharacteristic = pService->createCharacteristic(
+    ECDH_PUBLIC_KEY_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+  );
+  pEcdhCharacteristic->setCallbacks(new EcdhCallback());
+  
+  // Load or generate ECDH keys from NVS (handles paired/unpaired state)
+  Serial.println("Loading device pairing state...");
+  if (loadOrGenerateKeys()) {
+    pEcdhCharacteristic->setValue(esp32_public_key, 64);
+    if (isDevicePaired()) {
+      Serial.println("ECDH: Device is PAIRED - public key set in characteristic");
+      updateOutput("Device PAIRED");
+    } else {
+      Serial.println("ECDH: Device is UNPAIRED - public key set in characteristic");
+      updateOutput("Device UNPAIRED");
+    }
+  } else {
+    Serial.println("ERROR: ECDH initialization failed");
+    updateOutput("ECDH init failed");
+  }
+  
   Serial.println("Starting BLE service...");
   pService->start();
   
@@ -624,6 +1224,8 @@ void setup() {
 }
 
 void loop() {
+  // Simple disconnect handling - timeout logic removed until ECDH is implemented
+  // TODO Phase 1.2: Add proper reconnection with challenge-response after ECDH
   if (wasConnected && pServer) {
     int connectedCount = pServer->getConnectedCount();
     
@@ -632,11 +1234,6 @@ void loop() {
       sessionAuthorized = false;
       sessionToken = "";
       wasConnected = false;
-    }
-    else if (millis() - lastActivityMs > CONNECTION_TIMEOUT_MS) {
-      updateOutput("Connection timeout - no activity for 30s");
-      sessionAuthorized = false;
-      sessionToken = "";
     }
   }
   
