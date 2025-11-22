@@ -1,103 +1,267 @@
-# ROADMAP
+# Product Roadmap
 
-Industry-standard progression for security hardware development.
+Strategic development plan for ESP32 Password Manager. Organized by phases with clear goals and deliverables.
 
----
+## Document Purpose
 
-## PHASE 0 - Cleanup & Stabilization (1-2 weeks)
+This roadmap defines long-term product vision and feature delivery timeline. For current sprint work, see TODO.md. For technical implementation details, see ARCHITECTURE.md.
 
-Goal: Make firmware stable enough that future improvements won't crumble.
+## Version History
 
-### 0.1 - Repository & Development Hygiene
-
-- Migrate fully to PlatformIO
-- Add .gitignore
-- Create repo structure: /firmware, /docs, /hardware
-- Add mandatory docs: ROADMAP.md, TODO.md, CHANGELOG.md, PROTOCOL.md, THREAT_MODEL.md
-
-### 0.2 - Codebase Clean Boot
-
-- Remove startKeyManagerTask()
-- Make key derivation synchronous
-- Get main.cpp to compile + run under PlatformIO
-- Remove leftover Arduino-IDE garbage
-
-### 0.3 - Stability Fixes
-
-- Move all DB ops to a worker queue
-- Fix connection timeout logic
-- Fix BLE callback crashes
-- Stop sending decrypted passwords over BLE
-- Remove plaintext logs
-
-Output: A repo that compiles cleanly, runs reliably, and has documented structure.
+- v0.1.0 (Nov 1, 2025) - Initial prototype with basic encryption
+- v0.2.0 (Nov 22, 2025) - ECDH authentication and device binding
+- v0.3.0 (Target: Dec 15, 2025) - Database worker queue and AES-GCM
+- v1.0.0 (Target: Q1 2026) - Production-ready firmware
 
 ---
 
-## PHASE 1 - Protocol Hardening (3-5 weeks)
+## Phase 0: Foundation (COMPLETED)
 
-Goal: Finalize software architecture so that future hardware can implement it safely.
+**Timeline:** 2 weeks  
+**Status:** DONE
 
-### 1.1 - Cryptographic Security
+**Goals:**
+- Establish development environment
+- Create stable codebase foundation
+- Set up project documentation
 
-- Replace AES-CBC with AES-GCM
-- Add integrity (tag) verification
-- Zero all sensitive buffers
-- Increase session token to 128-256 bits
-
-### 1.2 - Authentication Security
-
-- Enforce BLE bonded-device whitelist
-- Replace static PIN with runtime PIN stored in NVS
-- Implement ECDH key exchange (software-only for now)
-- Implement challenge-response using ECDH-derived session key
-- Remove token-only auth once ECDH works
-
-### 1.3 - Credential Lifecycle
-
-- Redesign insert/update/get/delete to use worker queue
-- Add DB journaling + atomic backups
-- Create randomness test routine for IVs and session keys
-
-### 1.4 - UX & Flow
-
-- Define exact flow: Pair -> Approve -> Authorize -> Command
-- Document all command formats in PROTOCOL.md
-
-Output: A mature, secure prototype protocol ready for integration into secure hardware.
+**Deliverables:**
+- [x] PlatformIO project structure
+- [x] Synchronous key derivation (removed async task manager)
+- [x] Documentation framework (ROADMAP, TODO, ARCHITECTURE, CHANGELOG)
+- [x] Clean compilation and upload
 
 ---
 
-## PHASE 2 - Hardware Hardening (6-12 weeks)
+## Phase 1: Protocol Hardening (IN PROGRESS)
 
-Goal: Remove security risks of ESP32 + SD by migrating secrets to a secure element.
+**Timeline:** 4-6 weeks  
+**Status:** Sprint 2 of 4  
+**Target Completion:** December 2025
 
-### 2.1 - Secure Element Selection
+**Goals:**
+- Implement cryptographic authentication
+- Secure communication protocol
+- Prevent common attack vectors
+- Finalize software architecture
 
-Pick one:
-- NXP SE050 (best for security certifications)
-- Microchip ATECC608B (cheaper, easier)
-- STSAFE-A110 (balanced, good docs)
+### Phase 1.1: Cryptographic Security (COMPLETED)
 
-### 2.2 - Key Storage Migration
+**Deliverables:**
+- [x] Runtime key derivation from eFuse
+- [x] AES-256-CBC encryption for credentials
+- [x] IV generation and storage
+- [x] Secure buffer management (zeroing)
 
-- Device root key moves into SE
-- ECDH private operations done inside SE
-- DB master key wrapped/unwrapped via SE
-- BLE pairing public keys stored in SE
+### Phase 1.2: Authentication Security (MOSTLY COMPLETE)
 
-### 2.3 - Secure Boot & Flash Encryption
+**Deliverables:**
+- [x] ECDH key exchange (secp256r1)
+- [x] HKDF session key derivation
+- [x] Challenge-response authentication (HMAC-SHA256)
+- [x] Device binding with NVS persistence
+- [x] Unauthorized device rejection
+- [ ] Flutter ECDH client implementation (guide complete, code pending)
 
-If staying on ESP32:
-- Enable ESP-IDF Secure Boot
-- Enable Flash Encryption
-- Lock JTAG
-- Move critical config to NVS with encryption enabled
+### Phase 1.3: Data Integrity (PLANNED)
 
-### 2.4 - External Flash / Internal Flash Migration
+**Target:** Sprint 3 (Dec 1-15, 2025)
 
-Replace SD card with:
-- QSPI flash (Winbond) OR
+**Deliverables:**
+- [ ] Database worker queue (prevent corruption)
+- [ ] Atomic database operations
+- [ ] AES-GCM migration (authenticated encryption)
+- [ ] Session token strengthening (128-bit minimum)
+
+### Phase 1.4: Command Security (PLANNED)
+
+**Target:** Sprint 4 (Dec 15-31, 2025)
+
+**Deliverables:**
+- [ ] Encrypt commands with session key
+- [ ] Remove plaintext password transmission
+- [ ] Dynamic PIN generation and storage
+- [ ] Audit all security-sensitive logging
+
+**Phase 1 Success Criteria:**
+- Zero known authentication bypasses
+- All credentials encrypted at rest and in transit
+- Complete cryptographic device binding
+- Documented protocol specification
+
+---
+
+## Phase 2: Hardware Hardening (PLANNED)
+
+**Timeline:** 8-12 weeks  
+**Status:** Not Started  
+**Target Start:** Q1 2026
+
+**Goals:**
+- Move secrets to secure element
+- Enable hardware security features
+- Replace SD card with internal flash
+- Achieve certification-grade security
+
+### Phase 2.1: Secure Element Integration
+
+**Deliverables:**
+- [ ] Select secure element (SE050/ATECC608/STSAFE)
+- [ ] Migrate root key to SE
+- [ ] Perform ECDH operations in SE
+- [ ] Wrap database keys via SE
+
+### Phase 2.2: ESP32 Security Features
+
+**Deliverables:**
+- [ ] Enable Secure Boot
+- [ ] Enable Flash Encryption
+- [ ] Enable NVS encryption
+- [ ] Lock JTAG interface
+
+### Phase 2.3: Storage Migration
+
+**Deliverables:**
+- [ ] Replace SD card with QSPI flash or eMMC
+- [ ] Migrate SQLite to internal storage
+- [ ] Implement wear leveling
+- [ ] Add backup/recovery mechanism
+
+**Phase 2 Success Criteria:**
+- Private keys never exposed to software
+- Physical attack resistance
+- Certified secure boot chain
+- Tamper detection mechanisms
+
+---
+
+## Phase 3: User Experience (PLANNED)
+
+**Timeline:** 4-6 weeks  
+**Status:** Not Started  
+**Target Start:** Q2 2026
+
+**Goals:**
+- Improve usability and reliability
+- Add convenience features
+- Implement backup/restore
+- OTA firmware updates
+
+**Deliverables:**
+- [ ] USB HID keyboard emulation (type passwords)
+- [ ] OTA firmware update system
+- [ ] Encrypted backup export/import
+- [ ] Multiple device pairing support
+- [ ] Web-based configuration interface
+
+**Phase 3 Success Criteria:**
+- No USB cable needed for normal operation
+- Backup/restore working reliably
+- Firmware updates without re-pairing
+- User documentation complete
+
+---
+
+## Phase 4: Production Readiness (PLANNED)
+
+**Timeline:** 6-8 weeks  
+**Status:** Not Started  
+**Target Start:** Q3 2026
+
+**Goals:**
+- Production-quality code and testing
+- Hardware design finalization
+- Manufacturing preparation
+- Certification groundwork
+
+**Deliverables:**
+- [ ] Comprehensive unit test suite
+- [ ] Integration test framework
+- [ ] PCB design (custom board)
+- [ ] Enclosure design
+- [ ] Manufacturing documentation
+- [ ] Compliance testing (FCC, CE)
+
+**Phase 4 Success Criteria:**
+- 95%+ test coverage
+- Zero critical bugs
+- Manufacturing-ready design
+- Certification path identified
+
+---
+
+## Phase 5: Optional Enhancements (FUTURE)
+
+**Timeline:** Ongoing  
+**Status:** Backlog
+
+**Potential Features:**
+- Multi-factor authentication
+- Biometric unlock (fingerprint sensor)
+- Geographic restrictions (GPS-based)
+- Cloud synchronization (encrypted)
+- Browser extension integration
+- Hardware security key mode (FIDO2/U2F)
+
+---
+
+## Risk Management
+
+**Technical Risks:**
+- ECDH implementation vulnerabilities → Mitigation: Code review, penetration testing
+- SD card corruption → Mitigation: Worker queue, journaling
+- eFuse key extraction → Mitigation: Migrate to secure element
+
+**Timeline Risks:**
+- Phase 2 secure element integration → 3-4 weeks buffer built in
+- Flutter client development → Parallel track, not blocking
+
+**Dependency Risks:**
+- mbedTLS API changes → Pin to stable version
+- ESP-IDF breaking changes → Test before upgrades
+- Component availability → Identify alternate parts early
+
+---
+
+## Decision Log
+
+**Nov 1, 2025:** Chose PlatformIO over Arduino IDE (better dependency management)  
+**Nov 8, 2025:** Adopted ECDH over static shared secret (forward secrecy required)  
+**Nov 15, 2025:** Implemented device binding at application layer (stronger than BLE bonding)  
+**Nov 22, 2025:** Deferred BLE bonding whitelist to Phase 5 (application layer sufficient)
+
+---
+
+## Success Metrics
+
+**Security Metrics:**
+- Zero successful authentication bypasses in penetration testing
+- All stored credentials require device + PIN + ECDH key
+- Session keys provide forward secrecy
+
+**Quality Metrics:**
+- No data corruption in 1000-cycle stress test
+- Clean compilation with zero warnings
+- All public APIs documented
+
+**Usability Metrics:**
+- Pairing process under 30 seconds
+- Password retrieval under 2 seconds
+- Zero user-facing error messages in normal operation
+
+---
+
+## Document Maintenance
+
+**Update Frequency:** Reviewed every sprint (2 weeks)  
+**Owner:** Project Lead  
+**Last Review:** November 22, 2025
+
+**Review Triggers:**
+- Phase completion
+- Major architecture change
+- New security requirement identified
+- Timeline adjustment needed
 - eMMC (industrial grade)
 
 SQLite DB sits on encrypted flash, not removable SD.
