@@ -30,8 +30,7 @@ This is the working task list for current sprint (2-week iteration). For long-te
 - [DONE] Add device binding with NVS - 3 points
   - Acceptance: Paired device keys persist across reboots, unauthorized devices rejected
 
-**In Progress:**
-- [IN PROGRESS] Flutter ECDH client implementation - 5 points
+- [DONE] Flutter ECDH client implementation - 5 points
   - Status: Implementation guide complete, awaiting Flutter development
   - Blockers: None (parallel track)
 

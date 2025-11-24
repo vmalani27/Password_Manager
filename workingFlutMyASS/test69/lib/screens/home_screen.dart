@@ -85,23 +85,45 @@ class HomeScreen extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 16),
-              OutlinedButton.icon(
-                onPressed: () => _disconnect(context, notifier),
-                icon: const Icon(Icons.logout),
-                label: const Text('Disconnect'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.all(16),
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _disconnect(context, notifier),
+                      icon: const Icon(Icons.logout),
+                      label: const Text('Disconnect'),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.all(16),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Tooltip(
+                    message: 'Disconnect from ESP32.\nStays paired - you can reconnect without re-pairing.\nSession token will be cleared.',
+                    child: Icon(Icons.info_outline, size: 20, color: Colors.grey[600]),
+                  ),
+                ],
               ),
               const SizedBox(height: 16),
-              OutlinedButton.icon(
-                onPressed: () => _unpairDevice(context, notifier),
-                icon: const Icon(Icons.link_off),
-                label: const Text('Unpair Device'),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.all(16),
-                  foregroundColor: Colors.red,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _unpairDevice(context, notifier),
+                      icon: const Icon(Icons.link_off),
+                      label: const Text('Unpair Device'),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.all(16),
+                        foregroundColor: Colors.red,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Tooltip(
+                    message: 'Permanently unpair this device.\nErases ECDH keys from both phone and ESP32.\nRequires fresh pairing to reconnect.',
+                    child: Icon(Icons.info_outline, size: 20, color: Colors.red[300]),
+                  ),
+                ],
               ),
             ],
 

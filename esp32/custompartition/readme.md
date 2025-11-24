@@ -4,9 +4,9 @@ Hardware-based password vault with cryptographic authentication using ESP32, BLE
 
 ## Project Overview
 
-**Status:** Sprint 2 - Protocol Hardening (Phase 1.2)  
-**Version:** 0.2.0-alpha  
-**Last Updated:** November 22, 2025
+**Status:** Sprint 2 Complete - Refactored Architecture  
+**Version:** 0.3.0-alpha  
+**Last Updated:** November 24, 2025
 
 ### What This Project Does
 
@@ -15,17 +15,25 @@ Secure credential storage on ESP32 hardware, accessed wirelessly via Flutter mob
 ### Key Features
 
 **Implemented:**
-- AES-256-CBC encryption with eFuse-derived keys
-- ECDH key exchange (secp256r1 curve)
-- Challenge-response authentication (HMAC-SHA256)
-- Device binding with NVS persistence
-- SQLite encrypted credential storage
-- BLE secure connections with pairing
+- ✅ **Modular Architecture** - Refactored from 1241 lines monolithic to 5 manager modules
+- ✅ **AES-256-CBC Encryption** - eFuse-derived hardware keys for database encryption
+- ✅ **ECDH Key Exchange** - secp256r1 curve device binding
+- ✅ **Two-Layer Authentication** - ECDH device pairing + token-based session authorization
+- ✅ **Device Binding** - NVS persistence, one phone ↔ one ESP32
+- ✅ **SQLite Encrypted Storage** - Credentials encrypted at rest on SD card
+- ✅ **BLE Protocol** - Command/response with TX/RX characteristics
+- ✅ **Session Management** - Token auth with lockout protection
+- ✅ **Partition Viewer** - Boot-time flash partition and memory diagnostics
 
 **In Progress:**
+- 🔄 Flutter client integration (ECDH + token auth flow)
+- 🔄 Reconnection stability improvements
+
+**Planned (Phase 2):**
 - Database worker queue (prevent corruption)
 - AES-GCM migration (authenticated encryption)
 - Command encryption over BLE
+- Dynamic PIN generation
 
 ## Quick Start
 
@@ -57,6 +65,11 @@ pio run --target upload  # Flash to ESP32
 pio device monitor       # View serial output
 ```
 
+**Build Stats (Nov 24, 2025):**
+- Compilation time: 31.08 seconds
+- Flash usage: 1,641,537 bytes (41.7% of 3.93MB)
+- RAM usage: 46,944 bytes (14.3% of 320KB)
+
 ### First Boot
 
 1. ESP32 generates encryption keys from eFuse
@@ -75,19 +88,34 @@ pio device monitor       # View serial output
 
 ## Project Structure
 
+### Refactored Modular Architecture (Nov 2025)
+
 ```
 esp32/custompartition/
+├── include/
+│   ├── config.h              (58 lines - All constants, UUIDs, pin definitions)
+│   ├── crypto_manager.h      (80 lines - ECDH, NVS device binding)
+│   ├── ble_manager.h         (120 lines - BLE server, callbacks)
+│   ├── db_manager.h          (50 lines - SQLite operations)
+│   └── ui_manager.h          (40 lines - OLED display)
 ├── src/
-│   └── main.cpp              (1177 lines - needs refactoring)
+│   ├── main.cpp              (166 lines - Setup + partition diagnostics)
+│   ├── crypto_manager.cpp    (380 lines - ECDH implementation)
+│   ├── ble_manager.cpp       (474 lines - BLE + command handling)
+│   ├── db_manager.cpp        (230 lines - Database operations)
+│   └── ui_manager.cpp        (80 lines - Display management)
 ├── lib/
-│   └── secure_core/          (Encryption library)
-├── include/                  (Headers - to be created)
+│   └── secure_sd/            (Legacy encryption library)
+│       ├── secure_sd.h
+│       └── secure_sd.cpp
 ├── docs/
 │   ├── ARCHITECTURE.md       (Technical design)
 │   ├── ROADMAP.md            (Long-term plan)
 │   ├── TODO.md               (Current sprint backlog)
 │   └── ECDH_FLUTTER_GUIDE.md (Mobile app integration)
-├── platformio.ini            (Build configuration)
+├── flutreadme.md             (Flutter client protocol reference)
+├── platformio.ini            (Build config: -Iinclude, lib_ldf_mode=deep+)
+└── partitions.csv            (Custom flash layout)
 └── partitions.csv            (Flash layout)
 ```
 
@@ -100,9 +128,11 @@ esp32/custompartition/
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design, security model, component details
 - **[ROADMAP.md](docs/ROADMAP.md)** - Product roadmap, phased development plan
 - **[TODO.md](docs/TODO.md)** - Current sprint tasks, prioritized backlog
+- **[REFACTORING_GUIDE.md](docs/REFACTORING_GUIDE.md)** - Module architecture and migration guide
 
 ### For Integration
 - **[ECDH_FLUTTER_GUIDE.md](docs/ECDH_FLUTTER_GUIDE.md)** - Flutter client implementation guide
+- **[flutreadme.md](flutreadme.md)** - Complete ESP32 command protocol reference with source code examples
 
 ## Development Workflow
 
@@ -135,17 +165,26 @@ esp32/custompartition/
 
 ## Current Sprint Goals
 
-**Sprint 2 (Nov 15 - Nov 29, 2025)**
+**Sprint 2 (Nov 15 - Nov 29, 2025) -COMPLETED**
 
 Completed:
-- [x] ECDH key exchange implementation
-- [x] Challenge-response authentication
-- [x] Device binding with NVS persistence
+- ECDH key exchange implementation
+- Token-based session authentication
+- Device binding with NVS persistence
+- Code refactoring into modular architecture (1241 → 166 lines main.cpp, 92.7% reduction)
+- Successfully compiled refactored code (Flash: 41.7%, RAM: 14.3%)
+- Fixed BLE manager const pointer issues
+- Added ECDH session clearing on reconnection
+- Implemented partition diagnostics at boot
+- Documented complete command protocol in flutreadme.md
 
-In Progress:
-- [ ] Database worker queue
-- [ ] Remove plaintext passwords over BLE
-- [ ] Strengthen session tokens
+**Sprint 3 (Nov 30 - Dec 13, 2025) - PLANNING**
+
+Focus Areas:
+- Flutter client stability (reconnection handling)
+- Database worker queue (prevent corruption)
+- Remove plaintext passwords over BLE (AES-GCM)
+- Dynamic PIN generation (replace static 123456)
 
 See [TODO.md](docs/TODO.md) for detailed task list.
 

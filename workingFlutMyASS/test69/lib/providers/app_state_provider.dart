@@ -18,9 +18,7 @@ import '../models/connection_state.dart';
 import '../models/auth_state.dart';
 import '../models/credential.dart';
 import '../services/ble_connection_service.dart';
-import '../services/auth_service.dart';
 import '../services/credential_service.dart';
-import '../services/session_manager.dart';
 import '../services/command_service.dart';
 
 /// Application state that combines all service states
@@ -75,47 +73,36 @@ class AppState {
 }
 
 /// Provider for CommandService (needed by other services)
-final commandServiceProvider = Provider<CommandService>((ref) {
-  return CommandService();
+final commandServiceProvider = Provider.autoDispose<CommandService>((ref) {
+  final service = CommandService();
+  ref.onDispose(() => service.dispose());
+  return service;
 });
 
 /// Provider for BleConnectionService
-final bleConnectionServiceProvider = Provider<BleConnectionService>((ref) {
+final bleConnectionServiceProvider = Provider.autoDispose<BleConnectionService>((ref) {
   final commandService = ref.watch(commandServiceProvider);
-  return BleConnectionService(commandService);
-});
-
-/// Provider for AuthService
-final authServiceProvider = Provider<AuthService>((ref) {
-  final commandService = ref.watch(commandServiceProvider);
-  return AuthService(commandService);
+  final service = BleConnectionService(commandService);
+  ref.onDispose(() => service.dispose());
+  return service;
 });
 
 /// Provider for CredentialService
-final credentialServiceProvider = Provider<CredentialService>((ref) {
+final credentialServiceProvider = Provider.autoDispose<CredentialService>((ref) {
   final commandService = ref.watch(commandServiceProvider);
   return CredentialService(commandService);
-});
-
-/// Provider for SessionManager
-final sessionManagerProvider = Provider<SessionManager>((ref) {
-  return SessionManager();
 });
 
 /// Main application state provider
 final appStateProvider = StateNotifierProvider<AppStateNotifier, AppState>((ref) {
   final commandService = ref.watch(commandServiceProvider);
   final bleService = ref.watch(bleConnectionServiceProvider);
-  final authService = ref.watch(authServiceProvider);
   final credentialService = ref.watch(credentialServiceProvider);
-  final sessionManager = ref.watch(sessionManagerProvider);
   
   return AppStateNotifier(
     commandService: commandService,
     bleService: bleService,
-    authService: authService,
     credentialService: credentialService,
-    sessionManager: sessionManager,
   );
 });
 
@@ -123,16 +110,12 @@ final appStateProvider = StateNotifierProvider<AppStateNotifier, AppState>((ref)
 class AppStateNotifier extends StateNotifier<AppState> {
   final CommandService commandService;
   final BleConnectionService bleService;
-  final AuthService authService;
   final CredentialService credentialService;
-  final SessionManager sessionManager;
 
   AppStateNotifier({
     required this.commandService,
     required this.bleService,
-    required this.authService,
     required this.credentialService,
-    required this.sessionManager,
   }) : super(const AppState());
 
   /// Scan for ESP32 devices
@@ -169,10 +152,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
     required String deviceName,
     required String pin,
   }) async {
+    debugPrint('[AppState] ========================================');
+    debugPrint('[AppState] STARTING CONNECTION FLOW');
+    debugPrint('[AppState] Device: $deviceName');
+    debugPrint('[AppState] ID: $deviceId');
+    debugPrint('[AppState] ========================================');
+    
     try {
-      debugPrint('[AppState] Starting connection flow for $deviceName ($deviceId)');
-      
       // Step 1: Connect to device
+      debugPrint('[AppState] STEP 1: Initiating BLE connection...');
       state = state.copyWith(
         connectionState: ConnectionState.connecting,
         connectedDeviceId: deviceId,
@@ -181,58 +169,45 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       
       await bleService.connect(deviceId);
-      debugPrint('[AppState] BLE connected (OS bonding handled automatically)');
-      
-      // Update session manager
-      sessionManager.setConnectionState(ConnectionState.connected);
+      debugPrint('[AppState] STEP 1: BLE connection established ✓');
       
       state = state.copyWith(
         connectionState: ConnectionState.connected,
       );
       
       // Step 2: Subscribe to notifications (with retry logic for bonding)
-      // Brief pause to allow bonding dialog to appear if needed
-      debugPrint('[AppState] Starting service discovery with retry logic...');
+      debugPrint('[AppState] STEP 2: Waiting for bonding dialog (800ms)...');
       await Future.delayed(const Duration(milliseconds: 800));
       
+      debugPrint('[AppState] STEP 2: Starting notification subscription...');
       await bleService.subscribeToNotifications(deviceId);
-      debugPrint('[AppState] Subscribed to notifications');
+      debugPrint('[AppState] STEP 2: Notification subscription successful ✓');
       
-      // Give ESP32 time to be ready for commands
-      debugPrint('[AppState] Waiting for ESP32 to be ready...');
-      await Future.delayed(const Duration(milliseconds: 500));
-      debugPrint('[AppState] Ready to send commands');
+      // Give ESP32 time to be ready for commands and ensure notification stream is stable
+      debugPrint('[AppState] Waiting for ESP32 stabilization (800ms)...');
+      await Future.delayed(const Duration(milliseconds: 800));
+      debugPrint('[AppState] ESP32 ready for commands ✓');
       
       // Step 3: Perform ECDH key exchange (with pairing support)
+      debugPrint('[AppState] STEP 3: Starting ECDH handshake...');
       state = state.copyWith(
         authState: AuthState.requestingToken,
         connectionState: ConnectionState.authenticating,
       );
       
-      debugPrint('[AppState] Starting ECDH handshake...');
       final result = await commandService.performEcdhHandshake(deviceId, deviceName);
-      final ecdh = result.ecdh;
       final isNewPairing = result.isNewPairing;
+      debugPrint('[AppState] STEP 3: ECDH handshake complete ✓ (${isNewPairing ? "NEW PAIRING" : "RECONNECTION"})');
       
-      if (isNewPairing) {
-        debugPrint('[AppState] New device pairing established!');
-      } else {
-        debugPrint('[AppState] Reconnected to paired device');
-      }
-      
-      // Step 4: Authenticate using ECDH challenge-response
-      debugPrint('[AppState] Authenticating with ECDH...');
-      final authenticated = await commandService.authenticateWithEcdh(ecdh);
+      // Step 4: Authenticate session with token (separate from ECDH pairing)
+      debugPrint('[AppState] STEP 4: Starting token authentication...');
+      final authenticated = await commandService.authenticateWithToken();
       
       if (!authenticated) {
-        throw Exception('ECDH authentication failed');
+        throw Exception('Session authentication failed');
       }
       
-      debugPrint('[AppState] ECDH authentication successful');
-      
-      // Update session manager
-      sessionManager.setAuthState(AuthState.authenticated);
-      sessionManager.setConnectionState(ConnectionState.authenticated);
+      debugPrint('[AppState] STEP 4: Token authentication complete ✓');
       
       // Step 5: Update to ready state
       state = state.copyWith(
@@ -241,16 +216,26 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       
       // Load initial credentials
+      debugPrint('[AppState] STEP 5: Loading credentials...');
       await refreshCredentials();
       
-      debugPrint('[AppState] Connection flow complete - ready for operations');
+      debugPrint('[AppState] ========================================');
+      debugPrint('[AppState] CONNECTION FLOW COMPLETE ✓');
+      debugPrint('[AppState] Ready for operations');
+      debugPrint('[AppState] ========================================');
       
       return isNewPairing;
       
-    } catch (e) {
-      debugPrint('[AppState] Connection flow failed: $e');
+    } catch (e, stackTrace) {
+      debugPrint('[AppState] ========================================');
+      debugPrint('[AppState] CONNECTION FLOW FAILED ✗');
+      debugPrint('[AppState] Error: $e');
+      debugPrint('[AppState] Stack trace:');
+      debugPrint('$stackTrace');
+      debugPrint('[AppState] ========================================');
       
       // Clean up on error
+      debugPrint('[AppState] Cleaning up failed connection...');
       await disconnect();
       
       state = state.copyWith(
@@ -272,10 +257,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (deviceId != null) {
         await bleService.disconnect(deviceId);
       }
-      
-      // Reset session manager
-      sessionManager.setConnectionState(ConnectionState.disconnected);
-      sessionManager.setAuthState(AuthState.unauthenticated);
       
       state = const AppState(); // Reset to initial state
       

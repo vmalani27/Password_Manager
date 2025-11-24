@@ -13,21 +13,17 @@ class Credential extends Equatable {
   });
 
   /// Create a Credential from ESP32 response format
-  /// Expected format: "Site: example.com | User: john@example.com"
+  /// Expected format: "github.com user@email.com" (space-separated)
   factory Credential.fromEsp32Response(String line) {
-    final parts = line.split('|');
-    if (parts.length != 2) {
+    final parts = line.trim().split(RegExp(r'\s+'));
+    if (parts.length < 2) {
       throw FormatException('Invalid credential format: $line');
     }
 
-    final sitePart = parts[0].trim();
-    final userPart = parts[1].trim();
-
-    // Extract site value (remove "Site: " prefix)
-    final site = sitePart.replaceFirst(RegExp(r'^Site:\s*'), '').trim();
-    
-    // Extract username value (remove "User: " prefix)
-    final username = userPart.replaceFirst(RegExp(r'^User:\s*'), '').trim();
+    // Format: <site> <username>
+    // If username contains spaces, join all parts after first
+    final site = parts[0];
+    final username = parts.sublist(1).join(' ');
 
     return Credential(
       site: site,

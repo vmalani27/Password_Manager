@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
-import 'package:convert/convert.dart';
 import '../constants/ble_constants.dart';
 import 'ecdh_service.dart';
 import 'pairing_service.dart';
@@ -68,7 +67,10 @@ class CommandService {
             debugPrint('[CommandService] RAW: ${data.length} bytes: $data');
             final response = String.fromCharCodes(data).trim();
             debugPrint('[CommandService] ← Received: "$response"');
+            
+            // Broadcast to response stream
             _responseController.add(response);
+            debugPrint('[CommandService] Broadcast to ${_responseController.hasListener ? "ACTIVE" : "NO"} listeners');
           },
           onError: (error) {
             debugPrint('[CommandService] Stream error: $error');
@@ -252,7 +254,10 @@ class CommandService {
     String deviceId,
     String deviceName,
   ) async {
-    debugPrint('[ECDH] Starting handshake with device: $deviceName ($deviceId)...');
+    debugPrint('[ECDH] ========================================');
+    debugPrint('[ECDH] STARTING HANDSHAKE');
+    debugPrint('[ECDH] Device: $deviceName ($deviceId)');
+    debugPrint('[ECDH] ========================================');
     
     final pairingService = PairingService();
     final ecdh = EcdhService();
@@ -304,50 +309,92 @@ class CommandService {
       
       // Start listening for ECDH response BEFORE sending public key
       debugPrint('[ECDH] Setting up listener for ECDH response...');
+      debugPrint('[ECDH] Response stream has listeners: ${_responseController.hasListener}');
+      
       final completer = Completer<String>();
       late StreamSubscription<String> subscription;
       
+      // Buffer for responses that arrive before we're fully ready
+      String? bufferedResponse;
+      
       subscription = responseStream.listen((response) {
+        debugPrint('[ECDH] Received notification: $response');
         if (!completer.isCompleted) {
-          debugPrint('[ECDH] Received notification: $response');
           completer.complete(response);
           subscription.cancel();
+        } else {
+          bufferedResponse = response;
         }
       });
       
-      // Set timeout
-      Future.delayed(Duration(seconds: 5), () {
+      debugPrint('[ECDH] Listener attached, subscription active: ${!subscription.isPaused}');
+      
+      // Give stream listener time to attach (prevent race condition)
+      await Future.delayed(const Duration(milliseconds: 100));
+      
+      // Set timeout (increased to 10 seconds for reliability)
+      Timer? timeoutTimer;
+      timeoutTimer = Timer(const Duration(seconds: 10), () {
         if (!completer.isCompleted) {
           subscription.cancel();
-          completer.completeError(TimeoutException('No ECDH response from ESP32'));
+          debugPrint('[ECDH] TIMEOUT! No response received. Subscription active: ${!subscription.isPaused}');
+          completer.completeError(
+            TimeoutException(
+              'No ECDH response from ESP32 after 10 seconds. '
+              'ESP32 sent response but Flutter did not receive it. '
+              'Check notification characteristic subscription.'
+            )
+          );
         }
       });
       
-      // Send our public key to ESP32
-      debugPrint('[ECDH] Sending client public key...');
-      await _ble.writeCharacteristicWithoutResponse(
-        QualifiedCharacteristic(
-          serviceId: Uuid.parse(BleConstants.serviceUuid),
-          characteristicId: Uuid.parse(BleConstants.ecdhCharacteristicUuid),
-          deviceId: deviceId,
-        ),
-        value: clientPubKey,
-      );
+      // Send our public key to ESP32 using writeWithResponse for acknowledgment
+      debugPrint('[ECDH] Sending client public key (${clientPubKey.length} bytes)...');
+      try {
+        await _ble.writeCharacteristicWithResponse(
+          QualifiedCharacteristic(
+            serviceId: Uuid.parse(BleConstants.serviceUuid),
+            characteristicId: Uuid.parse(BleConstants.ecdhCharacteristicUuid),
+            deviceId: deviceId,
+          ),
+          value: clientPubKey,
+        );
+        debugPrint('[ECDH] Write acknowledged by ESP32');
+      } catch (e) {
+        debugPrint('[ECDH] Write failed: $e');
+        timeoutTimer.cancel();
+        subscription.cancel();
+        rethrow;
+      }
       
-      debugPrint('[ECDH] Write complete, waiting for ECDH response...');
+      // Give ESP32 time to process and send notification
+      await Future.delayed(const Duration(milliseconds: 200));
+      
+      debugPrint('[ECDH] Write complete, waiting for ECDH response via notification characteristic...');
       
       // Wait for ECDH response
       final response = await completer.future;
+      timeoutTimer.cancel(); // Cancel timeout if we got response
+      
+      // Check buffered response in case we missed it
+      final actualResponse = response.isEmpty && bufferedResponse != null 
+          ? bufferedResponse! 
+          : response;
+      
+      debugPrint('[ECDH] Final response: $actualResponse');
       
       // Handle different response types
-      if (response == Esp32Commands.ecdhOk) {
+      if (actualResponse == Esp32Commands.ecdhOk) {
         // Reconnection successful
-        debugPrint('[ECDH] Received ECDH_OK - reconnection successful!');
+        debugPrint('[ECDH] \u2713 Received ECDH_OK - reconnection successful!');
+        debugPrint('[ECDH] ========================================');
+        debugPrint('[ECDH] HANDSHAKE COMPLETE (RECONNECTION)');
+        debugPrint('[ECDH] ========================================');
         return (ecdh: ecdh, isNewPairing: false);
         
-      } else if (response == Esp32Commands.ecdhOkPaired) {
+      } else if (actualResponse == Esp32Commands.ecdhOkPaired) {
         // New pairing successful - save pairing data
-        debugPrint('[ECDH] Received ECDH_OK_PAIRED - new pairing established!');
+        debugPrint('[ECDH] \u2713 Received ECDH_OK_PAIRED - new pairing established!');
         
         final pairedDevice = PairedDevice(
           deviceId: deviceId,
@@ -361,21 +408,30 @@ class CommandService {
         await pairingService.savePairing(pairedDevice);
         
         debugPrint('[ECDH] Pairing saved to persistent storage');
+        debugPrint('[ECDH] ========================================');
+        debugPrint('[ECDH] HANDSHAKE COMPLETE (NEW PAIRING)');
+        debugPrint('[ECDH] ========================================');
         return (ecdh: ecdh, isNewPairing: true);
         
-      } else if (response == Esp32Commands.ecdhAlreadyPaired) {
+      } else if (actualResponse == Esp32Commands.ecdhAlreadyPaired) {
         // ESP32 is paired with a different device
+        debugPrint('[ECDH] \u2717 ESP32 already paired to different device');
         throw Exception(
           'ESP32 is already paired with a different device. '
           'Unpair the ESP32 first using the device button.'
         );
         
       } else {
-        throw Exception('Unexpected ECDH response: $response');
+        debugPrint('[ECDH] \u2717 Unexpected response: $actualResponse');
+        throw Exception('Unexpected ECDH response: $actualResponse');
       }
       
-    } catch (e) {
-      debugPrint('[ECDH] Handshake failed: $e');
+    } catch (e, stackTrace) {
+      debugPrint('[ECDH] ========================================');
+      debugPrint('[ECDH] HANDSHAKE FAILED');
+      debugPrint('[ECDH] Error: $e');
+      debugPrint('[ECDH] Stack trace: $stackTrace');
+      debugPrint('[ECDH] ========================================');
       ecdh.clear();
       rethrow;
     }
@@ -408,47 +464,60 @@ class CommandService {
     }
   }
   
-  /// Authenticate using ECDH challenge-response
-  Future<bool> authenticateWithEcdh(EcdhService ecdh) async {
+  /// Authenticate using standard token-based session authentication
+  /// This is separate from ECDH pairing - ECDH handles device binding,
+  /// token auth handles session authorization for commands
+  Future<bool> authenticateWithToken() async {
+    debugPrint('[Auth] ===== STARTING TOKEN AUTHENTICATION =====');
+    
     try {
-      debugPrint('[ECDH Auth] Requesting challenge...');
+      // 1. Request token from ESP32
+      debugPrint('[Auth] Step 1/3: Requesting session token...');
+      final response = await sendCommand(
+        Esp32Commands.requestToken,
+        timeout: const Duration(seconds: 10),
+      );
+      debugPrint('[Auth] Step 1/3: Received response: "$response"');
       
-      // 1. Request challenge
-      final response = await sendCommand(Esp32Commands.ecdhAuth);
-      
-      // 2. Parse challenge response
-      // Format: "CHALLENGE <32-char-hex>"
-      if (!response.startsWith(Esp32Commands.challengePrefix)) {
-        debugPrint('[ECDH Auth] Expected challenge, got: $response');
-        return false;
+      // 2. Parse token response
+      // Format: "TOKEN:XXXXXXXX" (colon, not space)
+      if (!response.startsWith(Esp32Commands.tokenPrefix)) {
+        final error = 'Expected TOKEN: response, got: "$response"';
+        debugPrint('[Auth] ERROR: $error');
+        throw Exception(error);
       }
       
-      final challengeHex = response.substring(Esp32Commands.challengePrefix.length).trim();
-      debugPrint('[ECDH Auth] Received challenge: $challengeHex');
+      final token = response.substring(Esp32Commands.tokenPrefix.length).trim();
+      debugPrint('[Auth] Step 2/3: Extracted token: "$token"');
       
-      // 3. Convert challenge from hex to bytes
-      final challengeBytes = Uint8List.fromList(hex.decode(challengeHex));
+      if (token.isEmpty) {
+        throw Exception('Token is empty after parsing');
+      }
       
-      // 4. Compute HMAC response
-      final hmacBytes = ecdh.computeHmac(challengeBytes);
-      final hmacHex = hex.encode(hmacBytes);
-      debugPrint('[ECDH Auth] Computed HMAC: $hmacHex');
+      // 3. Send auth command with token
+      debugPrint('[Auth] Step 3/3: Sending auth command: "auth $token"');
+      final authResult = await sendCommand(
+        Esp32Commands.auth(token),
+        timeout: const Duration(seconds: 10),
+      );
+      debugPrint('[Auth] Step 3/3: Auth response: "$authResult"');
       
-      // 5. Send response
-      final authResult = await sendCommand(Esp32Commands.respond(hmacHex));
-      
-      // 6. Check result: AUTH OK or AUTH FAIL
+      // 4. Check result: AUTH OK or AUTH FAIL
       if (authResult == Esp32Commands.authOk) {
-        debugPrint('[ECDH Auth] Authentication successful!');
+        debugPrint('[Auth] ===== TOKEN AUTHENTICATION SUCCESS =====');
         return true;
+      } else if (authResult == Esp32Commands.authFail) {
+        throw Exception('ESP32 rejected token (AUTH FAIL)');
+      } else if (authResult == Esp32Commands.locked) {
+        throw Exception('ESP32 is locked due to too many failed attempts');
       } else {
-        debugPrint('[ECDH Auth] Authentication failed: $authResult');
-        return false;
+        throw Exception('Unexpected auth response: "$authResult"');
       }
       
     } catch (e) {
-      debugPrint('[ECDH Auth] Error: $e');
-      return false;
+      debugPrint('[Auth] ===== TOKEN AUTHENTICATION FAILED =====');
+      debugPrint('[Auth] Error: $e');
+      rethrow;
     }
   }
 }

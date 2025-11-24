@@ -69,13 +69,11 @@ class Esp32Commands {
   // New commands for device identity
   static const String getDeviceIdentity = 'get_identity';
   
-  // ECDH authentication commands
-  static const String ecdhAuth = 'ecdh_auth';
-  static String respond(String hmacHex) => 'respond $hmacHex';
+  // Device pairing commands (ECDH layer only handles pairing, not session auth)
   static const String unpair = 'unpair';
   
   // Expected response prefixes
-  static const String tokenPrefix = 'TOKEN ';
+  static const String tokenPrefix = 'TOKEN:';
   static const String authOk = 'AUTH OK';
   static const String authFail = 'AUTH FAIL';
   static const String locked = 'LOCKED';
@@ -90,17 +88,15 @@ class Esp32Commands {
   static const String updateFail = 'UPDATE FAIL';
   static const String deleteFail = 'DELETE FAIL';
   static const String invalid = 'INVALID';
+  static const String logoutResponse = 'LOGOUT';
+  static const String unpairFail = 'UNPAIR_FAIL';
   
-  // ECDH response prefixes
+  // ECDH pairing response prefixes (device binding only, not session auth)
   static const String ecdhOk = 'ECDH_OK';
   static const String ecdhOkPaired = 'ECDH_OK_PAIRED';
   static const String ecdhAlreadyPaired = 'ECDH_ALREADY_PAIRED';
   static const String ecdhFail = 'ECDH_FAIL';
   static const String ecdhInvalid = 'ECDH_INVALID';
-  static const String ecdhNotReady = 'ECDH NOT READY';
-  static const String challengePrefix = 'CHALLENGE ';
-  static const String noChallenge = 'NO CHALLENGE';
-  static const String invalidResponse = 'INVALID RESPONSE';
   static const String unpaired = 'UNPAIRED';
   
   // Security responses

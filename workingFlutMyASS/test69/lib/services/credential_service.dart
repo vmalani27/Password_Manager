@@ -144,7 +144,7 @@ class CredentialService {
   
   /// List all credentials (returns site/username pairs only, no passwords)
   /// ESP32 code: if (cmd.equalsIgnoreCase("list")) { String out = listCredentials(); sendNotification("LIST:\n" + out); }
-  /// ESP32 format: "LIST:\nSite: example.com | User: john@example.com\nSite: google.com | User: jane@gmail.com"
+  /// ESP32 format: "LIST:\ngithub.com user@email.com\ngoogle.com admin"
   Future<List<Credential>> listCredentials(String deviceId) async {
     debugPrint('[Credential] Listing all credentials...');
     
