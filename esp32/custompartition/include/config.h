@@ -13,6 +13,10 @@
 // SD Card
 #define SD_CS 5
 
+// Unpair Button (GPIO0 = BOOT button on most ESP32 dev boards)
+#define UNPAIR_BUTTON_PIN 0
+#define BUTTON_HOLD_TIME_MS 3000  // Hold for 3 seconds to unpair
+
 // ============================================================================
 // BLE CONFIGURATION
 // ============================================================================
@@ -28,9 +32,12 @@
 // ============================================================================
 
 // Session Management
-#define CONNECTION_TIMEOUT_MS 30000
+#define CONNECTION_TIMEOUT_MS 300000      // 5 minutes - force disconnect
+#define SESSION_TIMEOUT_MS 180000         // 3 minutes - clear session but stay connected
+#define INACTIVITY_CHECK_INTERVAL 30000   // Check every 30 seconds
 #define MAX_FAILED_ATTEMPTS 5
 #define LOCKOUT_DURATION_MS (60UL * 1000UL)
+#define SESSION_ID_LENGTH 16              // 128-bit session ID
 
 // Cryptographic Key Sizes
 #define ECDH_PRIVATE_KEY_SIZE 32

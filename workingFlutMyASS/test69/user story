@@ -82,55 +82,470 @@
     - ESP32 responds with `AUTH OK`
     4. Client can now send commands (add, get, list, etc.)
 
-    ### Reconnection
-    1. Client checks if device is paired
-    2. **ECDH Device Verification:**
-    - Client loads saved private/public keys
-    - Client reads ESP32's public key (verify it matches)
-    - Client computes shared secret and session key
-    - Client sends saved public key to ESP32
-    - ESP32 recognizes client and responds `ECDH_OK`
-    3. **Session Authentication:**
-    - Client sends `request_token`
-    - ESP32 responds with `TOKEN <hex>`
-    - Client sends `auth <token>`
-    - ESP32 responds with `AUTH OK`
-    4. Client can now send commands
+### Reconnection
 
-    ### Key Concepts
+1. Client checks if device is paired
+2. **ECDH Device Verification:**
+- Client loads saved private/public keys
+- Client reads ESP32's public key (verify it matches)
+- Client computes shared secret and session key
+- Client sends saved public key to ESP32
+- ESP32 recognizes client and responds `ECDH_OK`
+3. **Session Authentication:**
+- Client sends `request_token`
+- ESP32 responds with `TOKEN <hex>`
+- Client sends `auth <token>`
+- ESP32 responds with `AUTH OK`
+4. Client can now send commands
+
+### Optimized Reconnection (Skip ECDH)
+
+**Problem:** Doing full ECDH handshake on every reconnection is slow and unnecessary.
+
+**Solution:** Use `check_pairing` command to verify pairing without ECDH.
+
+#### Implementation in BleConnectionService
+
+```dart
+class BleConnectionService {
+  Future<void> connectToPairedDevice(String deviceId) async {
+    try {
+      // Step 1: BLE Connect
+      await _connectBle(deviceId);
+      
+      // Step 2: Check if we can skip ECDH
+      final shouldSkipEcdh = await _checkPairingStatus();
+      
+      if (shouldSkipEcdh) {
+        // Fast path - skip ECDH, go straight to token auth
+        print('[BleConnection] Pairing verified - skipping ECDH');
+        await _authenticateSession();
+      } else {
+        // Slow path - do full ECDH handshake
+        print('[BleConnection] Need ECDH handshake');
+        await _performEcdhHandshake();
+        await _authenticateSession();
+      }
+      
+      print('[BleConnection] Connected and authenticated');
+    } catch (e) {
+      print('[BleConnection] Connection failed: $e');
+      rethrow;
+    }
+  }
+  
+  Future<bool> _checkPairingStatus() async {
+    try {
+      // Send check_pairing command
+      await _commandService.sendCommand('check_pairing');
+      final response = await _commandService.waitForResponse(
+        timeout: Duration(seconds: 2),
+      );
+      
+      if (response.startsWith('PAIRED:')) {
+        // Extract stored client public key (128 hex chars)
+        final storedKeyHex = response.substring(7);
+        
+        // Get our saved public key from storage
+        final ourPublicKey = await _pairingService.getClientPublicKey();
+        
+        if (ourPublicKey == null) {
+          print('[BleConnection] No saved public key - need ECDH');
+          return false;
+        }
+        
+        // Compare keys (case-insensitive)
+        if (storedKeyHex.toUpperCase() == ourPublicKey.toUpperCase()) {
+          print('[BleConnection] Keys match - can skip ECDH!');
+          return true;
+        } else {
+          print('[BleConnection] Key mismatch - need fresh ECDH');
+          return false;
+        }
+      } else if (response == 'UNPAIRED') {
+        print('[BleConnection] ESP32 is unpaired - need ECDH');
+        return false;
+      }
+      
+      return false;
+    } catch (e) {
+      print('[BleConnection] check_pairing failed: $e - falling back to ECDH');
+      return false;
+    }
+  }
+  
+  Future<void> _performEcdhHandshake() async {
+    print('[ECDH] Starting handshake...');
+    
+    // Read ESP32 public key from ECDH characteristic
+    final esp32PubKey = await _ecdhCharacteristic.read();
+    
+    // Generate our keys if we don't have them
+    if (!await _pairingService.hasKeys()) {
+      await _ecdhService.generateKeyPair();
+    }
+    
+    // Compute shared secret
+    await _ecdhService.computeSharedSecret(esp32PubKey);
+    
+    // Send our public key to ESP32
+    final ourPubKey = await _ecdhService.getPublicKey();
+    await _ecdhCharacteristic.write(ourPubKey);
+    
+    // Wait for ECDH response
+    final ecdhResponse = await _commandService.waitForResponse();
+    
+    if (ecdhResponse == 'ECDH_OK' || ecdhResponse == 'ECDH_OK_PAIRED') {
+      print('[ECDH] Handshake successful: $ecdhResponse');
+      
+      // Save pairing if it's new
+      if (ecdhResponse == 'ECDH_OK_PAIRED') {
+        await _pairingService.savePairing(
+          deviceId: _connectedDeviceId!,
+          esp32PublicKey: esp32PubKey,
+          clientPublicKey: ourPubKey,
+        );
+      }
+    } else {
+      throw Exception('ECDH failed: $ecdhResponse');
+    }
+  }
+  
+  Future<void> _authenticateSession() async {
+    // Request token
+    await _commandService.sendCommand('request_token');
+    final tokenResponse = await _commandService.waitForResponse();
+    
+    if (!tokenResponse.startsWith('TOKEN:')) {
+      throw Exception('Expected TOKEN, got: $tokenResponse');
+    }
+    
+    final token = tokenResponse.substring(6).trim();
+    
+    // Authenticate with token
+    await _commandService.sendCommand('auth $token');
+    final authResponse = await _commandService.waitForResponse();
+    
+    if (!authResponse.startsWith('AUTH OK:')) {
+      throw Exception('Auth failed: $authResponse');
+    }
+    
+    // Extract and save session ID for resume capability
+    final sessionId = authResponse.substring(8);
+    await _sessionStorage.saveSessionId(sessionId);
+    
+    print('[Auth] Session authenticated with ID: ${sessionId.substring(0, 8)}...');
+  }
+}
+```
+
+#### Disconnect vs Unpair Implementation
+
+```dart
+// Temporary disconnect - KEEP pairing data for fast reconnection
+Future<void> disconnect() async {
+  try {
+    await _commandService.sendCommand('force_disconnect');
+    await Future.delayed(Duration(milliseconds: 100));
+  } catch (e) {
+    print('[BleConnection] force_disconnect failed: $e');
+  }
+  
+  await _device?.disconnect();
+  
+  // IMPORTANT: DO NOT delete pairing data!
+  // Pairing stays in SharedPreferences for fast reconnection
+  
+  _connectedDeviceId = null;
+  _stateController.add(BleConnectionState.disconnected);
+  
+  print('[BleConnection] Disconnected (pairing preserved)');
+}
+
+// Permanent unpair - DELETE all pairing data
+Future<void> unpair() async {
+  try {
+    await _commandService.sendCommand('unpair');
+    await Future.delayed(Duration(milliseconds: 100));
+  } catch (e) {
+    print('[BleConnection] unpair command failed: $e');
+  }
+  
+  await _device?.disconnect();
+  
+  // IMPORTANT: Delete all pairing data
+  await _pairingService.deletePairing();
+  await _sessionStorage.clearSessionId();
+  
+  _connectedDeviceId = null;
+  _stateController.add(BleConnectionState.disconnected);
+  
+  print('[BleConnection] Unpaired (all data deleted)');
+}
+```
+
+#### PairingService Implementation
+
+```dart
+class PairingService {
+  static const String _keyClientPublicKey = 'client_public_key';
+  static const String _keyClientPrivateKey = 'client_private_key';
+  static const String _keyEsp32PublicKey = 'esp32_public_key';
+  static const String _keyDeviceId = 'paired_device_id';
+  
+  final SharedPreferences _prefs;
+  
+  PairingService(this._prefs);
+  
+  // Get saved client public key for verification
+  Future<String?> getClientPublicKey() async {
+    return _prefs.getString(_keyClientPublicKey);
+  }
+  
+  // Check if we have saved ECDH keys
+  Future<bool> hasKeys() async {
+    return _prefs.containsKey(_keyClientPublicKey) &&
+           _prefs.containsKey(_keyClientPrivateKey);
+  }
+  
+  // Check if device is paired
+  Future<bool> isPaired() async {
+    return _prefs.containsKey(_keyDeviceId);
+  }
+  
+  // Get paired device ID
+  Future<String?> getPairedDeviceId() async {
+    return _prefs.getString(_keyDeviceId);
+  }
+  
+  // Save pairing data (called after successful ECDH)
+  Future<void> savePairing({
+    required String deviceId,
+    required List<int> esp32PublicKey,
+    required List<int> clientPublicKey,
+    List<int>? clientPrivateKey,
+  }) async {
+    await _prefs.setString(_keyDeviceId, deviceId);
+    await _prefs.setString(_keyEsp32PublicKey, _toHex(esp32PublicKey));
+    await _prefs.setString(_keyClientPublicKey, _toHex(clientPublicKey));
+    
+    if (clientPrivateKey != null) {
+      await _prefs.setString(_keyClientPrivateKey, _toHex(clientPrivateKey));
+    }
+    
+    print('[Pairing] Saved pairing for device: $deviceId');
+  }
+  
+  // Delete all pairing data (called during unpair)
+  Future<void> deletePairing() async {
+    await _prefs.remove(_keyDeviceId);
+    await _prefs.remove(_keyEsp32PublicKey);
+    await _prefs.remove(_keyClientPublicKey);
+    await _prefs.remove(_keyClientPrivateKey);
+    
+    print('[Pairing] Deleted all pairing data');
+  }
+  
+  String _toHex(List<int> bytes) {
+    return bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join('')
+        .toUpperCase();
+  }
+}
+```
+
+**Performance Comparison:**
+
+| Method | Time | Steps |
+|--------|------|-------|
+| **Full ECDH** (old) | ~2-3 seconds | BLE connect → Read ECDH char → Write ECDH char → Compute secret → Token auth |
+| **Optimized** (new) | ~500ms | BLE connect → check_pairing → Token auth |
+
+**When to use each:**
+- **First pairing:** Full ECDH (required)
+- **Reconnection:** Optimized (skip ECDH)
+- **After unpair:** Full ECDH (required)
+- **Pairing corrupted:** Full ECDH (fallback)
+
+## Disconnect vs Unpair
+
+### Disconnect (Temporary Session End)
+
+**What happens:**
+- Sends `force_disconnect` command
+- ESP32 clears session token (temporary authorization)
+- BLE connection closes
+- **KEEPS pairing data:**
+  - ✅ Flutter: ECDH keys in SharedPreferences
+  - ✅ ESP32: Client public key in NVS
+  - ✅ Both devices remain "paired"
+
+**What Flutter should do:**
+```dart
+await sendCommand('force_disconnect');
+await bleConnection.disconnect();
+// DO NOT clear SharedPreferences
+```
+
+**Reconnection:**
+- Fast (~500ms with `check_pairing`)
+- No ECDH handshake needed
+- Only token authentication required
+
+**Use cases:**
+- App going to background
+- User switching apps
+- Normal app closure
+- Temporary connection loss
+
+### Unpair (Permanent Removal)
+
+**What happens:**
+- Sends `unpair` command
+- ESP32 erases NVS pairing data
+- ESP32 removes all BLE bonds
+- ESP32 generates new ECDH keys
+- BLE connection closes
+- **REMOVES pairing data:**
+  - ❌ Flutter: Must delete SharedPreferences
+  - ❌ ESP32: NVS cleared
+  - ❌ Both devices become "unpaired"
+
+**What Flutter should do:**
+```dart
+await sendCommand('unpair');
+await storage.deletePairingData(); // Clear SharedPreferences
+await bleConnection.disconnect();
+```
+
+**Reconnection:**
+- Slow (~2-3 seconds with full ECDH)
+- Full ECDH handshake required
+- Token authentication required
+
+**Use cases:**
+- User explicitly unpairing device
+- Pairing new phone
+- Factory reset
+- Security: lost phone scenario    ### Key Concepts
     - **ECDH Layer**: Device-level pairing (one phone ↔ one ESP32), persistent across reboots
     - **Token Layer**: Session-level authorization, required for each connection, expires on disconnect
     - **Why Both?**: ECDH prevents unauthorized devices from connecting, tokens prevent unauthorized commands even if connected
 
-    ### Unpair Flow
+### Unpair Flow
 
-    **From Flutter (authenticated user):**
-    1. Settings → "Unpair Device" button
-    2. Confirmation dialog
-    3. Client sends `unpair` command (lowercase, must be authenticated)
-    4. ESP32 erases NVS pairing data
-    5. ESP32 responds with `UNPAIRED`
-    6. Client deletes local pairing data (SharedPreferences)
-    7. ESP32 generates new ephemeral ECDH keys
-    8. Device returns to UNPAIRED state
-    9. New pairing can now be initiated
+**From Flutter (no authentication required for recovery):**
+1. Settings → "Unpair Device" button (or if session is lost)
+2. Confirmation dialog
+3. Client sends `unpair` command (**no auth required**)
+4. ESP32 erases NVS pairing data
+5. ESP32 removes all BLE bonds from stack
+6. ESP32 responds with `UNPAIRED`
+7. ESP32 generates new ephemeral ECDH keys
+8. ESP32 disconnects client (if connected)
+9. ESP32 restarts advertising
+10. Client deletes local pairing data (SharedPreferences)
+11. Device returns to UNPAIRED state
+12. New pairing can now be initiated
 
-    **From ESP32 (physical button - not yet implemented):**
-    1. User presses hardware reset button on ESP32
-    2. ESP32 erases NVS pairing data
-    3. ESP32 generates new ephemeral keys
-    4. Device returns to UNPAIRED state
-    5. Any connection from old phone gets `ECDH_ALREADY_PAIRED`
+**From OS Bluetooth Settings (OS-level unpair):**
+1. User goes to Android/iOS Settings → Bluetooth
+2. Forgets "ESP32-PWD-Manager"
+3. BLE bond is removed from both phone and ESP32
+4. User opens Flutter app and reconnects
+5. ESP32 detects missing BLE bond (`esp_ble_get_bond_device_num() == 0`)
+6. ESP32 automatically clears NVS pairing data
+7. ESP32 accepts fresh ECDH pairing
+8. ESP32 responds with `ECDH_OK_PAIRED` (fresh pairing)
+9. Device works normally with same phone
 
-    ### Unauthorized Device Rejection
-    1. Phone B tries to pair while Phone A is already paired
-    2. Phone B sends its public key to ESP32
-    3. ESP32 checks NVS: `stored_client_key ≠ phone_b_key`
-    4. ESP32 responds with `ECDH_ALREADY_PAIRED`
-    5. Phone B shows error: "Device is paired to another phone"
-    6. Phone B cannot authenticate - must unpair first
+**From ESP32 (physical button):**
+1. User presses and holds BOOT button (GPIO0) on ESP32 for 3 seconds
+2. ESP32 erases NVS pairing data
+3. ESP32 removes all BLE bonds from stack
+4. ESP32 generates new ephemeral keys
+5. If connected, sends `UNPAIRED` notification and disconnects
+6. Device returns to UNPAIRED state
+7. OLED displays "Device UNPAIRED"
+8. Any connection from old phone requires fresh pairing
 
-    ## Key Files
+**Use Cases:**
+- **OS-level unpair**: User accidentally forgets device in Bluetooth settings
+- **Physical button**: User lost phone, needs to pair new device
+- **Flutter unpair**: Normal unpair flow during device handoff### Unauthorized Device Rejection
+1. Phone B tries to pair while Phone A is already paired
+2. Phone B sends its public key to ESP32
+3. ESP32 checks NVS: `stored_client_key ≠ phone_b_key`
+4. ESP32 checks BLE bonds: `esp_ble_get_bond_device_num() > 0`
+5. ESP32 responds with `ECDH_ALREADY_PAIRED`
+6. Phone B shows error: "Device is paired to another phone"
+7. Phone B cannot authenticate - must unpair first
+
+### Session Resynchronization (US-SR-001)
+
+**Problem:** BLE connections may persist when app crashes, hot reloads, or gets killed by OS. This causes desynchronization where ESP32 thinks session is active but Flutter has lost state.
+
+**Solution:** Session state detection and recovery using `status`, `resume`, and `force_disconnect` commands.
+
+**On App Start/Reconnect:**
+```dart
+// Step 1: Check device state
+await sendCommand('status');
+final status = await waitForResponse();
+
+if (status == 'STATUS CONNECTED AUTHORIZED') {
+  // Try to resume with saved session ID
+  final savedSessionId = await storage.getSessionId();
+  if (savedSessionId != null) {
+    await sendCommand('resume $savedSessionId');
+    final resumeResponse = await waitForResponse();
+    
+    if (resumeResponse == 'RESUME OK') {
+      // Session resumed successfully
+      return;
+    }
+  }
+  
+  // Resume failed - re-authenticate
+  await authenticateSession();
+  
+} else if (status == 'STATUS CONNECTED UNAUTHORIZED') {
+  // Connection exists but not authorized - authenticate
+  await authenticateSession();
+  
+} else if (status == 'STATUS NOT_CONNECTED') {
+  // Not connected - full connection flow
+  await connectAndPair();
+}
+```
+
+**Session Timeout Handling:**
+- **3 minutes idle** → ESP32 clears session, sends `SESSION_TIMEOUT`
+- **5 minutes idle** → ESP32 forces disconnect, restarts advertising
+- Flutter should listen for `SESSION_TIMEOUT` and re-authenticate
+
+**Force Disconnect (on app background/close):**
+```dart
+@override
+void didChangeAppLifecycleState(AppLifecycleState state) {
+  if (state == AppLifecycleState.paused || 
+      state == AppLifecycleState.detached) {
+    // App backgrounded or closed - clean disconnect
+    sendCommand('force_disconnect');
+  }
+}
+```
+
+**Session ID Storage:**
+```dart
+// On successful auth
+final authResponse = await waitForResponse(); // "AUTH OK:1A2B3C4D5E6F..."
+if (authResponse.startsWith('AUTH OK:')) {
+  final sessionId = authResponse.substring(8); // Extract 32-char hex
+  await storage.saveSessionId(sessionId);
+}
+```    ## Key Files
 
     ### Services
     - `lib/services/pairing_service.dart` - Persistent pairing storage
@@ -271,7 +686,12 @@ ECDH_INVALID           - Invalid public key length (expected 64 bytes hex)
 | Command | Input Format | Response | Notes |
 |---------|--------------|----------|-------|
 | `request_token` | `request_token` | `TOKEN:<8-char-hex>` | Example: `TOKEN:1A2B3C4D` |
-| `auth` | `auth <token>` | `AUTH OK` / `AUTH FAIL` | Example: `auth 1A2B3C4D` |
+| `auth` | `auth <token>` | `AUTH OK:<32-char-hex-session-id>` / `AUTH FAIL` | Returns session ID for resume |
+| `status` | `status` | `STATUS CONNECTED AUTHORIZED PAIRED` / `STATUS CONNECTED UNAUTHORIZED PAIRED` / etc. | Check connection, auth, and pairing state |
+| `check_pairing` | `check_pairing` | `PAIRED:<128-char-hex>` / `UNPAIRED` | Returns stored client public key if paired (allows Flutter to skip ECDH) |
+| `force_disconnect` | `force_disconnect` | `DISCONNECTING` | Force clean disconnect |
+| `resume` | `resume <session_id>` | `RESUME OK` / `RESUME FAIL` | Resume session with saved ID |
+| `unpair` | `unpair` | `UNPAIRED` / `UNPAIR_FAIL` | **No auth required** - allows recovery if session lost |
 
 #### Credential Management (RX Characteristic - Requires Authorization)
 | Command | Input Format | Success | Failure | Notes |
@@ -281,22 +701,36 @@ ECDH_INVALID           - Invalid public key length (expected 64 bytes hex)
 | `update` | `update <site> <user> <newpass>` | `Updated` | `UPDATE FAIL` | Site+user must exist |
 | `delete` | `delete <site> <user>` | `Deleted` | `DELETE FAIL` | Removes from database |
 | `list` | `list` | `LIST:\n<site> <user>\n...` | *(none)* | All credentials |
-| `unpair` | `unpair` | `UNPAIRED` | `UNPAIR_FAIL` | Erases NVS pairing |
 | `logout` | `logout` | `LOGOUT` | *(none)* | Clears session token |
 
 #### Global Error Responses (All Commands)
 ```
-NOT AUTHORIZED    - No valid session (must complete token auth first)
-LOCKED           - Too many failed auth attempts (wait 30 seconds)
-INVALID          - Unknown command or wrong number of arguments
+NOT AUTHORIZED       - No valid session (must complete token auth first)
+LOCKED              - Too many failed auth attempts (wait 30 seconds)
+INVALID             - Unknown command or wrong number of arguments
+SESSION_TIMEOUT     - Session cleared after 3 minutes inactivity (stays connected)
+DISCONNECTING       - Acknowledging force_disconnect command
+```
+
+#### Session Management Responses
+```
+AUTH OK:<session_id>   - Authentication successful, 32-char hex session ID returned
+RESUME OK             - Session resumed successfully with valid session ID
+RESUME FAIL           - Invalid session ID, must re-authenticate
+STATUS CONNECTED AUTHORIZED        - Device connected and authorized
+STATUS CONNECTED UNAUTHORIZED      - Device connected but not authorized
+STATUS NOT_CONNECTED              - No active connection
 ```
 
 #### Implementation Details from ESP32 Source
 - **Case Sensitivity**: Commands use `.equalsIgnoreCase()` - case-insensitive
 - **Tokenization**: Space-delimited parsing (`cmd.split(' ')`)
 - **Token Format**: 8 hex characters (4 bytes from `esp_random()`)
+- **Session ID Format**: 32 hex characters (16 bytes, 128-bit)
 - **ECDH Key**: 64-byte hex string (32-byte P-256 public key)
-- **Lockout Policy**: 3 failed auth attempts → 30 second lock
+- **Lockout Policy**: 5 failed auth attempts → 60 second lock
+- **Session Timeout**: 3 minutes inactivity → Session cleared (stays connected)
+- **Connection Timeout**: 5 minutes inactivity → Force disconnect
 - **Session Lifetime**: Token cleared on disconnect or `logout`
 - **Pairing Persistence**: ECDH keys survive ESP32 reboot (NVS storage)    ### Authentication Sequence
 

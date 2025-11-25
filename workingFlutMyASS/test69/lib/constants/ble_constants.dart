@@ -57,14 +57,20 @@ class Esp32Commands {
   // Commands to send
   static const String requestToken = 'request_token';
   static String auth(String token) => 'auth $token';
-  static String add(String site, String username, String password) => 
-      'add $site $username $password';
-  static String get(String site, String username) => 'get $site $username';
-  static String update(String site, String username, String newPassword) => 
-      'update $site $username $newPassword';
-  static String delete(String site, String username) => 'delete $site $username';
+    static String add(String service, String identifier, String password) => 
+      'add $service $identifier $password';
+    static String get(String service, String identifier) => 'get $service $identifier';
+    static String update(String service, String identifier, String newPassword) => 
+      'update $service $identifier $newPassword';
+    static String delete(String service, String identifier) => 'delete $service $identifier';
   static const String list = 'list';
   static const String logout = 'logout';
+  
+  // Session management commands
+  static const String status = 'status';
+  static const String forceDisconnect = 'force_disconnect';
+  static String resume(String sessionId) => 'resume $sessionId';
+  static const String checkPairing = 'check_pairing';
   
   // New commands for device identity
   static const String getDeviceIdentity = 'get_identity';
@@ -74,7 +80,8 @@ class Esp32Commands {
   
   // Expected response prefixes
   static const String tokenPrefix = 'TOKEN:';
-  static const String authOk = 'AUTH OK';
+  static const String authOkPrefix = 'AUTH OK:'; // Changed: now includes session ID
+  static const String authOk = 'AUTH OK'; // Legacy support for response without session ID
   static const String authFail = 'AUTH FAIL';
   static const String locked = 'LOCKED';
   static const String notAuthorized = 'NOT AUTHORIZED';
@@ -91,6 +98,15 @@ class Esp32Commands {
   static const String logoutResponse = 'LOGOUT';
   static const String unpairFail = 'UNPAIR_FAIL';
   
+  // Session management responses
+  static const String statusConnectedAuthorized = 'STATUS CONNECTED AUTHORIZED';
+  static const String statusConnectedUnauthorized = 'STATUS CONNECTED UNAUTHORIZED';
+  static const String statusNotConnected = 'STATUS NOT_CONNECTED';
+  static const String disconnecting = 'DISCONNECTING';
+  static const String resumeOk = 'RESUME OK';
+  static const String resumeFail = 'RESUME FAIL';
+  static const String sessionTimeout = 'SESSION_TIMEOUT';
+  
   // ECDH pairing response prefixes (device binding only, not session auth)
   static const String ecdhOk = 'ECDH_OK';
   static const String ecdhOkPaired = 'ECDH_OK_PAIRED';
@@ -98,6 +114,7 @@ class Esp32Commands {
   static const String ecdhFail = 'ECDH_FAIL';
   static const String ecdhInvalid = 'ECDH_INVALID';
   static const String unpaired = 'UNPAIRED';
+  static const String pairedPrefix = 'PAIRED:'; // Response from check_pairing with stored key
   
   // Security responses
   static const String passwordReady = 'PW_READY'; // Future: instead of plaintext password

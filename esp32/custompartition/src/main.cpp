@@ -134,10 +134,18 @@ void setup() {
         while(1) delay(1000);
     }
     
+    // Start database worker task
+    if (!DBManager::getInstance().startWorkerTask()) {
+        UIManager::getInstance().updateOutput("DB worker failed.");
+        Serial.println("ERROR: Database worker task failed to start");
+        while(1) delay(1000);
+    }
+    
     UIManager::getInstance().updateOutput("System ready with encryption!");
     Serial.println("\n=== System Ready ===");
     Serial.println("BLE Name: ESP32-PWD-Manager");
     Serial.println("PIN: 123456");
+    Serial.println("Database worker: Running");
     Serial.println("Waiting for connections...\n");
 }
 
@@ -150,6 +158,9 @@ void loop() {
     CryptoManager& crypto = CryptoManager::getInstance();
     UIManager& ui = UIManager::getInstance();
     
+    // Check for timeouts (session timeout, connection timeout)
+    ble.loop();
+    
     // Handle disconnect and session cleanup
     if (ble.wasClientConnected() && ble.getServer()) {
         int connectedCount = ble.getServer()->getConnectedCount();
@@ -161,5 +172,5 @@ void loop() {
         }
     }
     
-    delay(1000);
+    delay(100);  // Reduced from 1000ms for better responsiveness
 }

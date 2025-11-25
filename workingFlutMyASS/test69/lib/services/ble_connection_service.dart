@@ -4,6 +4,7 @@ import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import '../constants/ble_constants.dart';
 import '../models/connection_state.dart' as models;
 import 'command_service.dart';
+import 'pairing_service.dart';
 
 /// Handles BLE device scanning, connection, and connection lifecycle
 /// Maps to ESP32 advertising and connection handling
@@ -22,6 +23,7 @@ class BleConnectionService {
   final List<DiscoveredDevice> _discoveredDevices = [];
   String? _connectedDeviceId;
   models.ConnectionState _currentState = models.ConnectionState.disconnected;
+  bool _hasCheckedForStaleConnections = false;
   
   /// Stream of discovered devices during scan
   Stream<List<DiscoveredDevice>> get discoveredDevicesStream => _discoveredDevicesController.stream;
@@ -140,6 +142,131 @@ class BleConnectionService {
     debugPrint('[BleConnection] Subscribed to ESP32 notifications');
   }
   
+  /// Check for stale ESP32 session and clean up if needed
+  /// Only runs once per app session on first connection
+  Future<void> cleanupStaleConnectionIfNeeded(String deviceId) async {
+    if (_hasCheckedForStaleConnections) {
+      debugPrint('[BleConnection] Stale check already completed - skipping');
+      return;
+    }
+
+    debugPrint('[BleConnection] ========================================');
+    debugPrint('[BleConnection] CHECKING FOR STALE ESP32 SESSION');
+    debugPrint('[BleConnection] (App may have been hot reloaded/restarted)');
+    debugPrint('[BleConnection] ========================================');
+
+    StreamSubscription<ConnectionStateUpdate>? tempSubscription;
+    
+    try {
+      // Brief connection to check status
+      debugPrint('[BleConnection] Attempting brief connection to check ESP32 state...');
+      
+      final connectionStream = _ble.connectToDevice(
+        id: deviceId,
+        connectionTimeout: const Duration(seconds: 5),
+      );
+
+      final completer = Completer<void>();
+      bool isConnected = false;
+
+      tempSubscription = connectionStream.listen(
+        (update) {
+          debugPrint('[BleConnection] Status check connection state: ${update.connectionState}');
+          
+          if (update.connectionState == DeviceConnectionState.connected) {
+            isConnected = true;
+            if (!completer.isCompleted) {
+              completer.complete();
+            }
+          } else if (update.connectionState == DeviceConnectionState.disconnected) {
+            if (!completer.isCompleted) {
+              completer.completeError(Exception('Status check connection failed'));
+            }
+          }
+        },
+        onError: (error) {
+          debugPrint('[BleConnection] Status check connection error: $error');
+          if (!completer.isCompleted) {
+            completer.completeError(error);
+          }
+        },
+      );
+
+      // Wait for connection with timeout
+      await completer.future.timeout(
+        Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('[BleConnection] Status check connection timeout - assuming ESP32 is clean');
+          throw TimeoutException('Status check connection timeout');
+        },
+      );
+
+      if (isConnected) {
+        debugPrint('[BleConnection] Connected for status check');
+        
+        // Give ESP32 time to stabilize
+        await Future.delayed(Duration(milliseconds: 500));
+        
+        // Subscribe to notifications for status check
+        debugPrint('[BleConnection] Setting up notifications for status check...');
+        await _commandService.subscribeToNotifications(deviceId);
+        
+        // Wait for notification subscription to be ready
+        await Future.delayed(Duration(milliseconds: 300));
+        
+        try {
+          // Try to get status
+          debugPrint('[BleConnection] Sending status command...');
+          final status = await _commandService.getStatus().timeout(
+            Duration(seconds: 3),
+            onTimeout: () {
+              debugPrint('[BleConnection] Status command timeout - assuming clean session');
+              return 'TIMEOUT';
+            },
+          );
+          
+          debugPrint('[BleConnection] ESP32 status: $status');
+          
+          if (status.contains('AUTHORIZED')) {
+            // Stale session detected - just disconnect, onDisconnect() will clear it
+            debugPrint('[BleConnection] STALE SESSION DETECTED - disconnecting to clear');
+            await Future.delayed(Duration(seconds: 2));
+            
+          } else if (status.contains('UNAUTHORIZED') || status == 'TIMEOUT') {
+            // Clean session or timeout - just disconnect
+            debugPrint('[BleConnection] Session is clean or ESP32 not responding - disconnecting');
+            await Future.delayed(Duration(seconds: 2));
+          }
+        } catch (e) {
+          debugPrint('[BleConnection] Status check failed: $e');
+          debugPrint('[BleConnection] Assuming clean session - will disconnect');
+          await Future.delayed(Duration(seconds: 2));
+        }
+        
+        // Clean up command service notifications
+        await _commandService.cleanup();
+      }
+
+    } catch (e) {
+      debugPrint('[BleConnection] Status check error: $e');
+      debugPrint('[BleConnection] Will proceed with normal connection');
+    } finally {
+      // Always cancel the status check connection
+      await tempSubscription?.cancel();
+      debugPrint('[BleConnection] Status check connection closed');
+      
+      // Mark as completed so we don't do this again
+      _hasCheckedForStaleConnections = true;
+      
+      // Extra delay to let ESP32 fully disconnect
+      debugPrint('[BleConnection] Waiting for ESP32 to fully reset...');
+      await Future.delayed(Duration(seconds: 2));
+      
+      debugPrint('[BleConnection] Cleanup complete - ready for fresh connection');
+      debugPrint('[BleConnection] ========================================');
+    }
+  }
+  
   /// Connect to a discovered device
   /// ESP32 accepts connection and triggers: ServerCallbacks::onConnect()
   Future<void> connect(String deviceId, {String? deviceName, int retryCount = 0}) async {
@@ -148,6 +275,26 @@ class BleConnectionService {
     debugPrint('[BleConnection] Device ID: $deviceId');
     debugPrint('[BleConnection] Device Name: ${deviceName ?? "unknown"}');
     debugPrint('[BleConnection] ========================================');
+    
+    // On first connection attempt, check for stale ESP32 session
+    // BUT ONLY if we have existing pairing data (reconnection scenario)
+    if (retryCount == 0) {
+      // Check if we have pairing data for this device
+      final pairingService = PairingService();
+      final pairedDevice = await pairingService.getPairedDevice();
+      final hasPairingData = pairedDevice?.deviceId == deviceId;
+      
+      if (hasPairingData) {
+        debugPrint('[BleConnection] Found pairing data - checking for stale session...');
+        await cleanupStaleConnectionIfNeeded(deviceId);
+        
+        // Add extra delay after cleanup to let Android BLE stack fully reset
+        debugPrint('[BleConnection] Waiting additional 1 second after cleanup for Android BLE reset...');
+        await Future.delayed(const Duration(seconds: 1));
+      } else {
+        debugPrint('[BleConnection] No pairing data - skipping stale session check (first-time pairing)');
+      }
+    }
     
     if (_connectedDeviceId == deviceId && _currentState.isConnected) {
       debugPrint('[BleConnection] Already connected to $deviceId');
@@ -175,11 +322,11 @@ class BleConnectionService {
       debugPrint('[BleConnection] Creating connection stream to $deviceId...');
       debugPrint('[BleConnection] Connection timeout: ${BleConstants.connectionTimeout}');
       
-      // Add delay before first connection attempt to let Android settle
-      if (retryCount == 0) {
-        debugPrint('[BleConnection] First attempt - waiting 500ms for Android to settle...');
-        await Future.delayed(const Duration(milliseconds: 500));
-      }      
+      // Add delay before connection attempt to let Android settle
+      // Always do this, not just on first retry - important after status check disconnect
+      debugPrint('[BleConnection] Waiting 1 second for Android to settle...');
+      await Future.delayed(const Duration(seconds: 1));
+      
       _connectionSubscription = _ble.connectToDevice(
         id: deviceId,
         connectionTimeout: BleConstants.connectionTimeout,
@@ -188,12 +335,12 @@ class BleConnectionService {
           debugPrint('[BleConnection] *** Connection state update: ${update.connectionState} ***');
           
           if (update.connectionState == DeviceConnectionState.connecting) {
-            debugPrint('[BleConnection] ⏳ CONNECTING state - Android may be performing bonding/pairing');
-            debugPrint('[BleConnection] ⏳ If bonding dialog appears, enter PIN: 123456');
+            debugPrint('[BleConnection] CONNECTING state - Android may be performing bonding/pairing');
+            debugPrint('[BleConnection] If bonding dialog appears, enter PIN: 123456');
             // Don't do anything here - wait for connected or disconnected
             
           } else if (update.connectionState == DeviceConnectionState.connected) {
-            debugPrint('[BleConnection] ✓ CONNECTED state received');
+            debugPrint('[BleConnection] CONNECTED state received');
             _connectedDeviceId = deviceId;
             _updateConnectionState(models.ConnectionState.connected);
             
@@ -202,15 +349,15 @@ class BleConnectionService {
               completer.complete();
             }
             
-            debugPrint('[BleConnection] ✓ Connection established to $deviceId');
+            debugPrint('[BleConnection] Connection established to $deviceId');
             
           } else if (update.connectionState == DeviceConnectionState.disconnected) {
-            debugPrint('[BleConnection] ✗ DISCONNECTED state received');
+            debugPrint('[BleConnection] DISCONNECTED state received');
             debugPrint('[BleConnection] isConnecting: $isConnecting, completer.isCompleted: ${completer.isCompleted}');
             
             // Only handle as error if we were still connecting
             if (isConnecting && !completer.isCompleted) {
-              debugPrint('[BleConnection] ✗ ERROR: Disconnected before connection established!');
+              debugPrint('[BleConnection] ERROR: Disconnected before connection established!');
               completer.completeError(Exception('Disconnected before connection established'));
             } else {
               debugPrint('[BleConnection] Normal disconnect (connection was established)');
@@ -222,7 +369,7 @@ class BleConnectionService {
           }
         },
         onError: (error) {
-          debugPrint('[BleConnection] ✗✗✗ CONNECTION ERROR ✗✗✗');
+          debugPrint('[BleConnection] CONNECTION ERROR');
           debugPrint('[BleConnection] Error type: ${error.runtimeType}');
           debugPrint('[BleConnection] Error: $error');
           _updateConnectionState(models.ConnectionState.error);
@@ -242,9 +389,9 @@ class BleConnectionService {
       // Wait for connection to complete
       try {
         await completer.future;
-        debugPrint('[BleConnection] ✓ completer.future completed successfully');
+        debugPrint('[BleConnection] completer.future completed successfully');
       } catch (e) {
-        debugPrint('[BleConnection] ✗ completer.future failed: $e');
+        debugPrint('[BleConnection] completer.future failed: $e');
         rethrow;
       }
       
@@ -260,7 +407,7 @@ class BleConnectionService {
       debugPrint('[BleConnection] Starting MTU negotiation...');
       try {
         await _requestMtu(deviceId);
-        debugPrint('[BleConnection] ✓ MTU negotiation complete');
+        debugPrint('[BleConnection] MTU negotiation complete');
       } catch (e) {
         debugPrint('[BleConnection] MTU negotiation failed (non-fatal): $e');
         // Continue anyway - MTU negotiation failure shouldn't kill connection
@@ -322,14 +469,21 @@ class BleConnectionService {
   }
   
   /// Disconnect from current device
-  /// ESP32 triggers: ServerCallbacks::onDisconnect()
+  /// ESP32 triggers: ServerCallbacks::onDisconnect() which clears the session
   Future<void> disconnect([String? deviceId]) async {
     debugPrint('[BleConnection] Disconnecting...');
     
+    final currentDeviceId = _connectedDeviceId ?? deviceId;
+    debugPrint('[BleConnection] Device ID: $currentDeviceId');
+    
+    // Cancel connection subscription - this triggers ESP32's onDisconnect()
+    // which automatically clears sessionAuthorized and sessionToken
     await _connectionSubscription?.cancel();
     _connectionSubscription = null;
     
     _handleDisconnection();
+    
+    debugPrint('[BleConnection] Disconnected - ESP32 will clear session in onDisconnect()');
   }
   
   /// Handle disconnection cleanup
@@ -346,6 +500,13 @@ class BleConnectionService {
       _connectionStateController.add(newState);
       debugPrint('[BleConnection] State: ${newState.displayText}');
     }
+  }
+  
+  /// Returns true if the given deviceId is currently connected
+  Future<bool> isDeviceConnected(String deviceId) async {
+    // Use FlutterReactiveBle's API to check connection
+    // If you have a direct reference, use it; otherwise, always return false if not matching
+    return _currentState == models.ConnectionState.connected || _currentState == models.ConnectionState.authenticated;
   }
   
   /// Dispose of all resources

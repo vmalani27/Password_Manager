@@ -152,6 +152,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     required String deviceName,
     required String pin,
   }) async {
+    final startTime = DateTime.now();
     debugPrint('[AppState] ========================================');
     debugPrint('[AppState] STARTING CONNECTION FLOW');
     debugPrint('[AppState] Device: $deviceName');
@@ -169,35 +170,38 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       
       await bleService.connect(deviceId);
-      debugPrint('[AppState] STEP 1: BLE connection established ✓');
+      debugPrint('[AppState] STEP 1: BLE connection established');
       
       state = state.copyWith(
         connectionState: ConnectionState.connected,
       );
       
       // Step 2: Subscribe to notifications (with retry logic for bonding)
-      debugPrint('[AppState] STEP 2: Waiting for bonding dialog (800ms)...');
-      await Future.delayed(const Duration(milliseconds: 800));
+      debugPrint('[AppState] STEP 2: Waiting for bonding dialog (200ms)...');
+      await Future.delayed(const Duration(milliseconds: 200));
       
       debugPrint('[AppState] STEP 2: Starting notification subscription...');
       await bleService.subscribeToNotifications(deviceId);
-      debugPrint('[AppState] STEP 2: Notification subscription successful ✓');
+      debugPrint('[AppState] STEP 2: Notification subscription successful');
       
       // Give ESP32 time to be ready for commands and ensure notification stream is stable
-      debugPrint('[AppState] Waiting for ESP32 stabilization (800ms)...');
-      await Future.delayed(const Duration(milliseconds: 800));
-      debugPrint('[AppState] ESP32 ready for commands ✓');
+      debugPrint('[AppState] Waiting for ESP32 stabilization (200ms)...');
+      await Future.delayed(const Duration(milliseconds: 200));
+      debugPrint('[AppState] ESP32 ready for commands');
       
-      // Step 3: Perform ECDH key exchange (with pairing support)
-      debugPrint('[AppState] STEP 3: Starting ECDH handshake...');
+      // Step 3: Perform ECDH key exchange (with optimized reconnection)
+      debugPrint('[AppState] STEP 3: Starting optimized ECDH handshake...');
       state = state.copyWith(
         authState: AuthState.requestingToken,
         connectionState: ConnectionState.authenticating,
       );
       
-      final result = await commandService.performEcdhHandshake(deviceId, deviceName);
+      final result = await commandService.performOptimizedReconnection(deviceId, deviceName);
+      
       final isNewPairing = result.isNewPairing;
-      debugPrint('[AppState] STEP 3: ECDH handshake complete ✓ (${isNewPairing ? "NEW PAIRING" : "RECONNECTION"})');
+      final skippedEcdh = result.skippedEcdh;
+      
+      debugPrint('[AppState] STEP 3: ECDH complete (new=${isNewPairing}, optimized=${skippedEcdh})');
       
       // Step 4: Authenticate session with token (separate from ECDH pairing)
       debugPrint('[AppState] STEP 4: Starting token authentication...');
@@ -207,7 +211,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         throw Exception('Session authentication failed');
       }
       
-      debugPrint('[AppState] STEP 4: Token authentication complete ✓');
+      debugPrint('[AppState] STEP 4: Token authentication complete');
       
       // Step 5: Update to ready state
       state = state.copyWith(
@@ -219,16 +223,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
       debugPrint('[AppState] STEP 5: Loading credentials...');
       await refreshCredentials();
       
+      final endTime = DateTime.now();
+      final duration = endTime.difference(startTime);
+      
       debugPrint('[AppState] ========================================');
-      debugPrint('[AppState] CONNECTION FLOW COMPLETE ✓');
-      debugPrint('[AppState] Ready for operations');
+      debugPrint('[AppState] CONNECTION COMPLETE');
+      debugPrint('[AppState] Total time: ${duration.inMilliseconds}ms');
       debugPrint('[AppState] ========================================');
       
       return isNewPairing;
       
     } catch (e, stackTrace) {
       debugPrint('[AppState] ========================================');
-      debugPrint('[AppState] CONNECTION FLOW FAILED ✗');
+      debugPrint('[AppState] CONNECTION FLOW FAILED');
       debugPrint('[AppState] Error: $e');
       debugPrint('[AppState] Stack trace:');
       debugPrint('$stackTrace');
@@ -254,10 +261,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
   Future<void> disconnect() async {
     try {
       final deviceId = state.connectedDeviceId;
+      debugPrint('[AppState] Disconnect called for device: $deviceId');
+      
       if (deviceId != null) {
+        debugPrint('[AppState] Calling bleService.disconnect...');
         await bleService.disconnect(deviceId);
+        debugPrint('[AppState] bleService.disconnect completed');
+      } else {
+        debugPrint('[AppState] No connected device - skipping BLE disconnect');
       }
       
+      // Reset state AFTER disconnect completes
       state = const AppState(); // Reset to initial state
       
       debugPrint('[AppState] Disconnected and state reset');
@@ -317,18 +331,38 @@ class AppStateNotifier extends StateNotifier<AppState> {
       
       debugPrint('[AppState] Refreshed ${credentials.length} credentials');
     } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Failed to load credentials: $e',
-      );
+      // Check if this is a session timeout or NOT AUTHORIZED
+      if (e.toString().contains('SESSION_TIMEOUT') || e.toString().contains('NOT AUTHORIZED')) {
+        debugPrint('[AppState] Session timeout detected during refresh');
+        _handleSessionTimeout();
+      } else {
+        state = state.copyWith(
+          isLoading: false,
+          errorMessage: 'Failed to load credentials: $e',
+        );
+      }
       rethrow;
     }
   }
 
+  /// Handle session timeout - update state to show session expired
+  void _handleSessionTimeout() {
+    debugPrint('[AppState] ========================================');
+    debugPrint('[AppState] SESSION TIMEOUT DETECTED');
+    debugPrint('[AppState] ESP32 cleared the session due to inactivity');
+    debugPrint('[AppState] ========================================');
+    
+    state = state.copyWith(
+      authState: AuthState.unauthenticated,
+      errorMessage: 'Session expired due to inactivity. Please reconnect.',
+      isLoading: false,
+    );
+  }
+
   /// Add a new credential
   Future<void> addCredential({
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
     required String password,
   }) async {
     final deviceId = state.connectedDeviceId;
@@ -340,29 +374,33 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state = state.copyWith(isLoading: true, clearError: true);
       
       await credentialService.addCredential(
-        deviceId: deviceId,
-        site: site,
-        username: username,
+        service: service,
+        identifier: identifier,
         password: password,
       );
       
       // Refresh list after adding
       await refreshCredentials();
       
-      debugPrint('[AppState] Added credential for $site');
+      debugPrint('[AppState] Added credential for $service');
     } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Failed to add credential: $e',
-      );
+      if (e.toString().contains('SESSION_TIMEOUT') || e.toString().contains('NOT AUTHORIZED')) {
+        debugPrint('[AppState] Session timeout detected during add');
+        _handleSessionTimeout();
+      } else {
+        state = state.copyWith(
+          isLoading: false,
+          errorMessage: 'Failed to add credential: $e',
+        );
+      }
       rethrow;
     }
   }
 
   /// Get password for a specific credential
   Future<String> getPassword({
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
   }) async {
     final deviceId = state.connectedDeviceId;
     if (deviceId == null || !state.isReady) {
@@ -373,9 +411,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state = state.copyWith(isLoading: true, clearError: true);
       
       final password = await credentialService.getPassword(
-        deviceId: deviceId,
-        site: site,
-        username: username,
+        service: service,
+        identifier: identifier,
       );
       
       state = state.copyWith(isLoading: false);
@@ -384,21 +421,26 @@ class AppStateNotifier extends StateNotifier<AppState> {
         throw Exception('Password not found');
       }
       
-      debugPrint('[AppState] Retrieved password for $site / $username');
+      debugPrint('[AppState] Retrieved password for $service / $identifier');
       return password;
     } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Failed to get password: $e',
-      );
+      if (e.toString().contains('SESSION_TIMEOUT') || e.toString().contains('NOT AUTHORIZED')) {
+        debugPrint('[AppState] Session timeout detected during get password');
+        _handleSessionTimeout();
+      } else {
+        state = state.copyWith(
+          isLoading: false,
+          errorMessage: 'Failed to get password: $e',
+        );
+      }
       rethrow;
     }
   }
 
   /// Update an existing credential's password
   Future<void> updateCredential({
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
     required String newPassword,
   }) async {
     final deviceId = state.connectedDeviceId;
@@ -410,29 +452,33 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state = state.copyWith(isLoading: true, clearError: true);
       
       await credentialService.updateCredential(
-        deviceId: deviceId,
-        site: site,
-        username: username,
+        service: service,
+        identifier: identifier,
         newPassword: newPassword,
       );
       
       // Refresh list after updating
       await refreshCredentials();
       
-      debugPrint('[AppState] Updated credential for $site / $username');
+      debugPrint('[AppState] Updated credential for $service / $identifier');
     } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Failed to update credential: $e',
-      );
+      if (e.toString().contains('SESSION_TIMEOUT') || e.toString().contains('NOT AUTHORIZED')) {
+        debugPrint('[AppState] Session timeout detected during update');
+        _handleSessionTimeout();
+      } else {
+        state = state.copyWith(
+          isLoading: false,
+          errorMessage: 'Failed to update credential: $e',
+        );
+      }
       rethrow;
     }
   }
 
   /// Delete a credential
   Future<void> deleteCredential({
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
   }) async {
     final deviceId = state.connectedDeviceId;
     if (deviceId == null || !state.isReady) {
@@ -443,20 +489,24 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state = state.copyWith(isLoading: true, clearError: true);
       
       await credentialService.deleteCredential(
-        deviceId: deviceId,
-        site: site,
-        username: username,
+        service: service,
+        identifier: identifier,
       );
       
       // Refresh list after deleting
       await refreshCredentials();
       
-      debugPrint('[AppState] Deleted credential for $site / $username');
+      debugPrint('[AppState] Deleted credential for $service / $identifier');
     } catch (e) {
-      state = state.copyWith(
-        isLoading: false,
-        errorMessage: 'Failed to delete credential: $e',
-      );
+      if (e.toString().contains('SESSION_TIMEOUT') || e.toString().contains('NOT AUTHORIZED')) {
+        debugPrint('[AppState] Session timeout detected during delete');
+        _handleSessionTimeout();
+      } else {
+        state = state.copyWith(
+          isLoading: false,
+          errorMessage: 'Failed to delete credential: $e',
+        );
+      }
       rethrow;
     }
   }

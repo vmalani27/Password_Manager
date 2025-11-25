@@ -12,19 +12,23 @@ class CredentialService {
   
   CredentialService(this._commandService);
   
+  String _normalizeService(String service) {
+    return service.replaceAll(' ', '_');
+  }
+
   /// Add a new credential to ESP32
   /// ESP32 code: if (cmd.equalsIgnoreCase("add") && tokens.size() == 4) { insertCredential(...); sendNotification(ok ? "Added" : "ADD FAIL"); }
   Future<bool> addCredential({
-    required String deviceId,
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
     required String password,
   }) async {
-    debugPrint('[Credential] Adding: $site / $username');
+    final normalizedService = _normalizeService(service);
+    debugPrint('[Credential] Adding: $normalizedService / $identifier');
     
     try {
       final response = await _commandService.sendCommand(
-        Esp32Commands.add(site, username, password),
+        Esp32Commands.add(normalizedService, identifier, password),
         timeout: BleConstants.commandTimeout,
       );
       
@@ -33,8 +37,8 @@ class CredentialService {
         debugPrint('[Credential] Added successfully');
         return true;
       } else if (response.contains(Esp32Commands.addFail)) {
-        debugPrint('[Credential] Add failed');
-        return false;
+        debugPrint('[Credential] Add failed - credential may already exist');
+        throw Exception('Failed to add credential. It may already exist or storage is full.');
       } else {
         throw Exception('Unexpected add response: $response');
       }
@@ -48,15 +52,15 @@ class CredentialService {
   /// Get password for a specific credential
   /// ESP32 code: if (cmd.equalsIgnoreCase("get") && tokens.size() == 3) { String pw = getPassword(...); sendNotification("Password: " + pw); }
   Future<String?> getPassword({
-    required String deviceId,
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
   }) async {
-    debugPrint('[Credential] Getting password: $site / $username');
+    final normalizedService = _normalizeService(service);
+    debugPrint('[Credential] Getting password: $normalizedService / $identifier');
     
     try {
       final response = await _commandService.sendCommand(
-        Esp32Commands.get(site, username),
+        Esp32Commands.get(normalizedService, identifier),
         timeout: BleConstants.commandTimeout,
       );
       
@@ -80,16 +84,16 @@ class CredentialService {
   /// Update password for existing credential
   /// ESP32 code: if (cmd.equalsIgnoreCase("update") && tokens.size() == 4) { updateCredential(...); sendNotification(ok ? "Updated" : "UPDATE FAIL"); }
   Future<bool> updateCredential({
-    required String deviceId,
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
     required String newPassword,
   }) async {
-    debugPrint('[Credential] Updating: $site / $username');
+    final normalizedService = _normalizeService(service);
+    debugPrint('[Credential] Updating: $normalizedService / $identifier');
     
     try {
       final response = await _commandService.sendCommand(
-        Esp32Commands.update(site, username, newPassword),
+        Esp32Commands.update(normalizedService, identifier, newPassword),
         timeout: BleConstants.commandTimeout,
       );
       
@@ -98,8 +102,8 @@ class CredentialService {
         debugPrint('[Credential] Updated successfully');
         return true;
       } else if (response.contains(Esp32Commands.updateFail)) {
-        debugPrint('[Credential] Update failed');
-        return false;
+        debugPrint('[Credential] Update failed - credential not found');
+        throw Exception('Failed to update credential. It may not exist.');
       } else {
         throw Exception('Unexpected update response: $response');
       }
@@ -113,15 +117,15 @@ class CredentialService {
   /// Delete a credential
   /// ESP32 code: if (cmd.equalsIgnoreCase("delete") && tokens.size() == 3) { deleteCredential(...); sendNotification(ok ? "Deleted" : "DELETE FAIL"); }
   Future<bool> deleteCredential({
-    required String deviceId,
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
   }) async {
-    debugPrint('[Credential] Deleting: $site / $username');
+    final normalizedService = _normalizeService(service);
+    debugPrint('[Credential] Deleting: $normalizedService / $identifier');
     
     try {
       final response = await _commandService.sendCommand(
-        Esp32Commands.delete(site, username),
+        Esp32Commands.delete(normalizedService, identifier),
         timeout: BleConstants.commandTimeout,
       );
       
@@ -130,8 +134,8 @@ class CredentialService {
         debugPrint('[Credential] Deleted successfully');
         return true;
       } else if (response.contains(Esp32Commands.deleteFail)) {
-        debugPrint('[Credential] Delete failed');
-        return false;
+        debugPrint('[Credential] Delete failed - credential not found');
+        throw Exception('Failed to delete credential. It may not exist.');
       } else {
         throw Exception('Unexpected delete response: $response');
       }
@@ -142,7 +146,7 @@ class CredentialService {
     }
   }
   
-  /// List all credentials (returns site/username pairs only, no passwords)
+  /// List all credentials (returns service/identifier pairs only, no passwords)
   /// ESP32 code: if (cmd.equalsIgnoreCase("list")) { String out = listCredentials(); sendNotification("LIST:\n" + out); }
   /// ESP32 format: "LIST:\ngithub.com user@email.com\ngoogle.com admin"
   Future<List<Credential>> listCredentials(String deviceId) async {
@@ -156,6 +160,12 @@ class CredentialService {
       
       // ESP32 sends: "LIST:\n(none)" or "LIST:\ncredential data"
       // Check for both literal "\n" and actual newline
+      
+      // Check for NOT AUTHORIZED (session expired)
+      if (response == 'NOT AUTHORIZED') {
+        throw Exception('SESSION_TIMEOUT: Not authorized');
+      }
+      
       if (!response.startsWith('LIST:')) {
         throw Exception('Unexpected list response: $response');
       }
@@ -178,7 +188,7 @@ class CredentialService {
         return [];
       }
       
-      // Parse each line: "Site: example.com | User: john@example.com"
+      // Parse each line: "Service: example.com | Identifier: john@example.com"
       final lines = content.split('\n');
       final credentials = <Credential>[];
       
@@ -206,18 +216,16 @@ class CredentialService {
   /// This is a convenience method that combines list + get operations
   Future<Credential?> getFullCredential({
     required String deviceId,
-    required String site,
-    required String username,
+    required String service,
+    required String identifier,
   }) async {
-    final password = await getPassword(deviceId: deviceId, site: site, username: username);
-    
+    final password = await getPassword(service: service, identifier: identifier);
     if (password == null) {
       return null;
     }
-    
     return Credential(
-      site: site,
-      username: username,
+      service: service,
+      identifier: identifier,
       password: password,
     );
   }

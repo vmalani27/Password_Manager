@@ -674,6 +674,28 @@ if (!crypto.computeSharedSecret(clientKey)) {
     2. Re-authenticate with token flow
     3. If still failing, disconnect and reconnect
 
+    ### "Cannot Connect After Hot Reload/Restart"
+    **Cause:** Flutter app restarted but ESP32 still has active session  
+    **What Happens:**
+    - Hot reload/restart clears Flutter's state
+    - ESP32 still thinks old session is active
+    - New connection attempt rejected or times out
+    
+    **Automatic Solution (v2.0+):**
+    - App automatically detects stale ESP32 sessions on first connection
+    - Sends `logout` to clear stale session
+    - Waits 2 seconds for ESP32 to reset
+    - Proceeds with fresh connection
+    
+    **Manual Solution:**
+    1. Physically reset ESP32 (power cycle or reset button)
+    2. OR wait ~30 seconds for ESP32 timeout
+    3. OR use "Unpair" button before closing app
+    
+    **Prevention:**
+    - Always use "Disconnect" button before closing app
+    - Use "Unpair" if you plan to hot reload during development
+
     ### Passwords Not Saving
     **Cause:** SD card issue or database corruption  
     **Solution:**

@@ -55,6 +55,12 @@ public:
     // Initialization
     bool begin();
     
+    // Main loop for timeout checking
+    void loop();
+    
+    // Unpair button check
+    void checkUnpairButton();
+    
     // Notification
     void sendNotification(const String& data);
     
@@ -106,6 +112,19 @@ private:
     unsigned long lockoutUntilMs;
     unsigned long lastActivityMs;
     bool wasConnected;
+    
+    // Timeout tracking
+    unsigned long lastInactivityCheck;
+    
+    // Unpair button tracking
+    unsigned long buttonPressStartTime;
+    bool buttonPressed;
+    
+    // Helper methods
+    void generateSessionId();
+    String sessionIdToHex();
+    bool verifySessionId(const String& clientSessionId);
+    void checkInactivityTimeout();
 };
 
 #endif // BLE_MANAGER_H

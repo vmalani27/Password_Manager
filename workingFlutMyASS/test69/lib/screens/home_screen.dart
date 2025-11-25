@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/app_state_provider.dart';
 import '../models/connection_state.dart' as models;
 import '../services/permission_service.dart';
+import '../services/pairing_service.dart';
 import 'device_scan_screen.dart';
 import 'credential_manager_screen.dart';
 
@@ -11,10 +12,42 @@ import 'credential_manager_screen.dart';
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({Key? key}) : super(key: key);
 
+  Future<void> _autoReconnectIfPaired(WidgetRef ref, BuildContext context) async {
+    final notifier = ref.read(appStateProvider.notifier);
+    final pairingService = PairingService();
+    final isPaired = await pairingService.isPaired();
+    if (isPaired) {
+      final device = await pairingService.getPairedDevice();
+      if (device != null) {
+        await notifier.connectAndAuthenticate(
+          deviceId: device.deviceId,
+          deviceName: device.deviceName,
+          pin: '123456', // TODO: Replace with actual PIN logic if needed
+        );
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Auto-reconnected to paired device'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final appState = ref.watch(appStateProvider);
     final notifier = ref.read(appStateProvider.notifier);
+
+    // Auto-reconnect logic: only runs once when widget builds and not already connected
+    if (!appState.isReady && appState.connectedDeviceId == null) {
+      // Use a post-frame callback to avoid build context issues
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _autoReconnectIfPaired(ref, context);
+      });
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -62,6 +95,95 @@ class HomeScreen extends ConsumerWidget {
             ),
 
             const SizedBox(height: 32),
+
+            // Paired device info (when disconnected but paired)
+            if (!appState.isReady && !appState.isLoading)
+              FutureBuilder<bool>(
+                future: _checkIfPaired(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasData && snapshot.data == true) {
+                    return FutureBuilder<Map<String, String>>(
+                      future: _getPairedDeviceInfo(),
+                      builder: (context, deviceSnapshot) {
+                        if (deviceSnapshot.hasData) {
+                          final deviceInfo = deviceSnapshot.data!;
+                          return Column(
+                            children: [
+                              Card(
+                                color: Colors.blue.shade50,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16.0),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Icon(Icons.devices, color: Colors.blue.shade700),
+                                          const SizedBox(width: 12),
+                                          Text(
+                                            'Paired Device',
+                                            style: TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.blue.shade700,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      _buildInfoRow('Device Name', deviceInfo['name'] ?? 'Unknown'),
+                                      const SizedBox(height: 4),
+                                      _buildInfoRow('Device ID', deviceInfo['id'] ?? 'Unknown'),
+                                      const SizedBox(height: 4),
+                                      _buildInfoRow('Paired On', deviceInfo['date'] ?? 'Unknown'),
+                                      const SizedBox(height: 16),
+                                      SizedBox(
+                                        width: double.infinity,
+                                        child: ElevatedButton.icon(
+                                          onPressed: () => _reconnectToPairedDevice(context, notifier, deviceInfo),
+                                          icon: const Icon(Icons.link),
+                                          label: const Text('Reconnect to Paired Device'),
+                                          style: ElevatedButton.styleFrom(
+                                            padding: const EdgeInsets.all(12),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      SizedBox(
+                                        width: double.infinity,
+                                        child: OutlinedButton.icon(
+                                          onPressed: () => _unpairFromHome(context, notifier),
+                                          icon: const Icon(Icons.link_off),
+                                          label: const Text('Unpair Device'),
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: Colors.red,
+                                            padding: const EdgeInsets.all(12),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                'OR',
+                                style: TextStyle(
+                                  color: Colors.grey,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                            ],
+                          );
+                        }
+                        return const SizedBox.shrink();
+                      },
+                    );
+                  }
+                  return const SizedBox.shrink();
+                },
+              ),
 
             // Action buttons
             if (!appState.isReady) ...[
@@ -345,6 +467,161 @@ class HomeScreen extends ConsumerWidget {
           );
         }
       } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to unpair: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  /// Check if a device is currently paired
+  Future<bool> _checkIfPaired() async {
+    try {
+      final pairingService = PairingService();
+      return await pairingService.isPaired();
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// Get paired device information
+  Future<Map<String, String>> _getPairedDeviceInfo() async {
+    try {
+      final pairingService = PairingService();
+      final device = await pairingService.getPairedDevice();
+      
+      if (device != null) {
+        return {
+          'name': device.deviceName,
+          'id': device.deviceId,
+          'date': '${device.pairedAt.year}-${device.pairedAt.month.toString().padLeft(2, '0')}-${device.pairedAt.day.toString().padLeft(2, '0')}',
+        };
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] Error getting paired device info: $e');
+    }
+    
+    return {};
+  }
+
+  /// Build an info row with label and value
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      children: [
+        Text(
+          '$label: ',
+          style: const TextStyle(
+            fontWeight: FontWeight.w500,
+            color: Colors.grey,
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontWeight: FontWeight.w500),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Reconnect to the paired device
+  Future<void> _reconnectToPairedDevice(
+    BuildContext context,
+    AppStateNotifier notifier,
+    Map<String, String> deviceInfo,
+  ) async {
+    try {
+      await notifier.connectAndAuthenticate(
+        deviceId: deviceInfo['id']!,
+        deviceName: deviceInfo['name']!,
+        pin: '123456',
+      );
+      
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Reconnected successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reconnection failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Unpair device from home screen (when disconnected)
+  Future<void> _unpairFromHome(BuildContext context, AppStateNotifier notifier) async {
+    debugPrint('[HomeScreen] _unpairFromHome called');
+    
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unpair Device'),
+        content: const Text(
+          'This will remove the pairing between this phone and the ESP32.\n\n'
+          'You will need to scan and pair again on next connection.\n\n'
+          'Are you sure?'
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Unpair'),
+          ),
+        ],
+      ),
+    );
+
+    debugPrint('[HomeScreen] User confirmation: $confirm');
+
+    if (confirm == true) {
+      try {
+        debugPrint('[HomeScreen] Starting unpair process (disconnected state)...');
+        
+        // Remove local pairing data
+        final pairingService = PairingService();
+        await pairingService.removePairing();
+        debugPrint('[HomeScreen] Local pairing data removed');
+        
+        // Force a state refresh to update UI immediately
+        // Use a small delay to ensure file system writes complete
+        await Future.delayed(const Duration(milliseconds: 100));
+        debugPrint('[HomeScreen] Triggering state refresh...');
+        
+        // Trigger a state update to refresh the UI
+        notifier.clearError();
+        debugPrint('[HomeScreen] State refresh triggered');
+        
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Device unpaired successfully'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          debugPrint('[HomeScreen] Success SnackBar shown');
+        }
+      } catch (e) {
+        debugPrint('[HomeScreen] Unpair error: $e');
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(

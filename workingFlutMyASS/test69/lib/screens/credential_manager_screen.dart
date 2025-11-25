@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/foundation.dart';
+import 'package:test69/models/auth_state.dart';
 import '../providers/app_state_provider.dart';
 import '../models/credential.dart';
+import '../models/connection_state.dart' as app_conn;
+import 'session_lock_overlay.dart';
 
 /// Credential manager screen - view, add, edit, delete credentials
 class CredentialManagerScreen extends ConsumerStatefulWidget {
@@ -12,14 +16,38 @@ class CredentialManagerScreen extends ConsumerStatefulWidget {
   ConsumerState<CredentialManagerScreen> createState() => _CredentialManagerScreenState();
 }
 
-class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScreen> {
+class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Refresh credentials when screen opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(appStateProvider.notifier).refreshCredentials();
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      final notifier = ref.read(appStateProvider.notifier);
+      final appState = ref.read(appStateProvider);
+      // Check BLE connection status when app resumes
+      if (appState.connectionState == app_conn.ConnectionState.authenticated) {
+        notifier.bleService.isDeviceConnected(appState.connectedDeviceId ?? '').then((isConnected) {
+          if (!isConnected) {
+            notifier.disconnect();
+          }
+        });
+      }
+    }
   }
 
   @override
@@ -38,66 +66,93 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          // Loading indicator
-          if (appState.isLoading)
-            const LinearProgressIndicator(),
-
-          // Error message
-          if (appState.errorMessage != null)
-            Container(
-              color: Colors.red.shade50,
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              child: Row(
+          if (appState.connectionState == app_conn.ConnectionState.disconnected || appState.authState == AuthState.unauthenticated)
+            Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.error_outline, color: Colors.red.shade700),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      appState.errorMessage!,
-                      style: TextStyle(color: Colors.red.shade700),
-                    ),
+                  Icon(Icons.bluetooth_disabled, size: 64, color: Colors.grey),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Not connected to device',
+                    style: Theme.of(context).textTheme.titleLarge,
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => notifier.clearError(),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Please connect to your ESP32 to view credentials.',
+                    style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ],
               ),
-            ),
-
-          // Credential count
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Text(
-              '${appState.credentials.length} credential(s) stored',
-              style: Theme.of(context).textTheme.bodyLarge,
-            ),
-          ),
-
-          // Credential list
-          Expanded(
-            child: appState.credentials.isEmpty
-                ? const Center(
-                    child: Text('No credentials stored.\nTap + to add one.'),
-                  )
-                : ListView.builder(
-                    itemCount: appState.credentials.length,
-                    itemBuilder: (context, index) {
-                      final credential = appState.credentials[index];
-                      return _buildCredentialTile(context, credential, notifier);
-                    },
+            )
+          else
+            Column(
+              children: [
+                // Loading indicator
+                if (appState.isLoading)
+                  const LinearProgressIndicator(),
+                // Error message
+                if (appState.errorMessage != null && appState.isReady)
+                  Container(
+                    color: Colors.red.shade50,
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        Icon(Icons.error_outline, color: Colors.red.shade700),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            appState.errorMessage!,
+                            style: TextStyle(color: Colors.red.shade700),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close),
+                          onPressed: () => notifier.clearError(),
+                        ),
+                      ],
+                    ),
                   ),
-          ),
+                // Credential count
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    '${appState.credentials.length} credential(s) stored',
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                ),
+                // Credential list
+                Expanded(
+                  child: appState.credentials.isEmpty
+                      ? const Center(
+                          child: Text('No credentials stored.\nTap + to add one.'),
+                        )
+                      : ListView.builder(
+                          itemCount: appState.credentials.length,
+                          itemBuilder: (context, index) {
+                            final credential = appState.credentials[index];
+                            return _buildCredentialTile(context, credential, notifier);
+                          },
+                        ),
+                ),
+              ],
+            ),
+          // Session timeout lock screen overlay
+          if (!appState.isReady && appState.errorMessage != null && 
+              appState.errorMessage!.contains('Session expired'))
+            buildSessionLockOverlay(context, notifier, appState),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _showAddCredentialDialog(context, notifier),
-        child: const Icon(Icons.add),
-        tooltip: 'Add Credential',
-      ),
+      floatingActionButton: (appState.connectionState == app_conn.ConnectionState.authenticated && appState.authState == AuthState.authenticated)
+          ? FloatingActionButton(
+              onPressed: () => _showAddCredentialDialog(context, notifier),
+              child: const Icon(Icons.add),
+              tooltip: 'Add Credential',
+            )
+          : null,
     );
   }
 
@@ -110,7 +165,7 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: ListTile(
         leading: const Icon(Icons.vpn_key),
-        title: Text(credential.site),
+        title: Text(credential.service),
         subtitle: Text(credential.username),
         trailing: PopupMenuButton(
           itemBuilder: (context) => [
@@ -170,15 +225,15 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
   ) async {
     try {
       final password = await notifier.getPassword(
-        site: credential.site,
-        username: credential.username,
+        service: credential.service,
+        identifier: credential.identifier,
       );
 
       if (context.mounted) {
         showDialog(
           context: context,
           builder: (context) => AlertDialog(
-            title: Text(credential.site),
+            title: Text(credential.service),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -210,8 +265,13 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
       }
     } catch (e) {
       if (context.mounted) {
+        // Extract meaningful error message
+        final errorMsg = e.toString().replaceFirst('Exception: ', '');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to get password: $e')),
+          SnackBar(
+            content: Text(errorMsg),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     }
@@ -221,8 +281,8 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
     BuildContext context,
     AppStateNotifier notifier,
   ) async {
-    final siteController = TextEditingController();
-    final usernameController = TextEditingController();
+    final serviceController = TextEditingController();
+    final identifierController = TextEditingController();
     final passwordController = TextEditingController();
 
     final result = await showDialog<bool>(
@@ -233,12 +293,12 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
-              controller: siteController,
-              decoration: const InputDecoration(labelText: 'Site'),
+              controller: serviceController,
+              decoration: const InputDecoration(labelText: 'Service'),
             ),
             TextField(
-              controller: usernameController,
-              decoration: const InputDecoration(labelText: 'Username'),
+              controller: identifierController,
+              decoration: const InputDecoration(labelText: 'Identifier'),
             ),
             TextField(
               controller: passwordController,
@@ -263,8 +323,8 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
     if (result == true) {
       try {
         await notifier.addCredential(
-          site: siteController.text.trim(),
-          username: usernameController.text.trim(),
+          service: serviceController.text.trim(),
+          identifier: identifierController.text.trim(),
           password: passwordController.text,
         );
         
@@ -275,8 +335,13 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
         }
       } catch (e) {
         if (context.mounted) {
+          // Extract meaningful error message
+          final errorMsg = e.toString().replaceFirst('Exception: ', '');
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to add credential: $e')),
+            SnackBar(
+              content: Text(errorMsg),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }
@@ -298,7 +363,7 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Site: ${credential.site}'),
+            Text('Service: ${credential.service}'),
             Text('Username: ${credential.username}'),
             const SizedBox(height: 16),
             TextField(
@@ -324,8 +389,8 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
     if (result == true && passwordController.text.isNotEmpty) {
       try {
         await notifier.updateCredential(
-          site: credential.site,
-          username: credential.username,
+          service: credential.service,
+          identifier: credential.identifier,
           newPassword: passwordController.text,
         );
         
@@ -336,8 +401,13 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
         }
       } catch (e) {
         if (context.mounted) {
+          // Extract meaningful error message
+          final errorMsg = e.toString().replaceFirst('Exception: ', '');
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to update password: $e')),
+            SnackBar(
+              content: Text(errorMsg),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }
@@ -353,7 +423,7 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete Credential'),
-        content: Text('Delete credential for ${credential.site}?'),
+        content: Text('Delete credential for ${credential.service}?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -371,8 +441,8 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
     if (confirm == true) {
       try {
         await notifier.deleteCredential(
-          site: credential.site,
-          username: credential.username,
+          service: credential.service,
+          identifier: credential.identifier,
         );
         
         if (context.mounted) {
@@ -382,8 +452,13 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
         }
       } catch (e) {
         if (context.mounted) {
+          // Extract meaningful error message
+          final errorMsg = e.toString().replaceFirst('Exception: ', '');
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to delete credential: $e')),
+            SnackBar(
+              content: Text(errorMsg),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }

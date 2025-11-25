@@ -75,9 +75,35 @@ void EcdhCallback::onWrite(BLECharacteristic* pCharacteristic) {
                     Serial.println("ECDH: Paired device auth failed");
                 }
             } else {
-                // Different device trying to connect
-                Serial.println("ECDH: Rejected - device already paired to another client");
-                ble.sendNotification("ECDH_ALREADY_PAIRED");
+                // Different device trying to connect - check if BLE bond exists
+                int dev_num = esp_ble_get_bond_device_num();
+                bool bleUnpaired = (dev_num == 0);  // No BLE bonds = user unpaired from OS
+                
+                if (bleUnpaired) {
+                    // User unpaired from OS settings - allow re-pairing with old device
+                    Serial.println("ECDH: BLE bond removed - allowing re-pair with stored device");
+                    Serial.println("ECDH: Clearing NVS pairing to allow fresh start");
+                    crypto.unpairDevice();
+                    
+                    // Now accept new pairing
+                    Serial.println("ECDH: New pairing initiated");
+                    if (crypto.computeSharedSecret((const uint8_t*)rxValue.c_str())) {
+                        if (crypto.savePairing((const uint8_t*)rxValue.c_str())) {
+                            ble.sendNotification("ECDH_OK_PAIRED");
+                            Serial.println("ECDH: New device paired successfully");
+                        } else {
+                            ble.sendNotification("ECDH_OK");
+                            Serial.println("ECDH: Handshake OK but pairing save failed");
+                        }
+                    } else {
+                        ble.sendNotification("ECDH_FAIL");
+                        Serial.println("ECDH: Handshake failed");
+                    }
+                } else {
+                    // Different device trying to connect while BLE still bonded
+                    Serial.println("ECDH: Rejected - device already paired to another client");
+                    ble.sendNotification("ECDH_ALREADY_PAIRED");
+                }
             }
         } else {
             // Device is unpaired - accept new pairing
@@ -115,14 +141,25 @@ void ServerCallbacks::onDisconnect(BLEServer* server) {
     BLEManager& ble = BLEManager::getInstance();
     CryptoManager& crypto = CryptoManager::getInstance();
     
-    UIManager::getInstance().updateOutput("Client disconnected.");
-    server->getAdvertising()->start();
+    Serial.println("Client disconnected.");
     
+    // CRITICAL: Always clear ALL session state on disconnect
     ble.clearSession();
     ble.setWasConnected(false);
+    ble.resetFailedAuth();
     crypto.clearECDH();
     
-    UIManager::getInstance().updateOutput("Session cleared on disconnect.");
+    Serial.println("ECDH: Session state cleared");
+    Serial.println("Session cleared on disconnect.");
+    
+    UIManager::getInstance().updateOutput("Client disconnected.");
+    UIManager::getInstance().updateOutput("Session cleared.");
+    
+    // Ensure advertising restarts within 2 seconds
+    delay(500);
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->start();
+    Serial.println("Advertising restarted after disconnect");
 }
 
 // ============================================================================
@@ -146,6 +183,9 @@ BLEManager::BLEManager()
     , lockoutUntilMs(0)
     , lastActivityMs(0)
     , wasConnected(false)
+    , lastInactivityCheck(0)
+    , buttonPressStartTime(0)
+    , buttonPressed(false)
 {
 }
 
@@ -269,8 +309,13 @@ bool BLEManager::begin() {
     Serial.println("BLEManager: Setting BLE MTU...");
     BLEDevice::setMTU(256);
     
+    // Setup unpair button
+    pinMode(UNPAIR_BUTTON_PIN, INPUT_PULLUP);
+    Serial.println("BLEManager: Unpair button configured on GPIO" + String(UNPAIR_BUTTON_PIN));
+    
     lastActivityMs = millis();
     Serial.println("BLEManager: Initialization complete");
+    Serial.println("INFO: Hold BOOT button for 3 seconds to unpair device");
     
     return true;
 }
@@ -314,6 +359,7 @@ String BLEManager::generateSessionToken() {
 void BLEManager::clearSession() {
     sessionAuthorized = false;
     sessionToken = "";
+    failedAuthAttempts = 0;
 }
 
 // Increment failed auth attempts
@@ -327,6 +373,119 @@ void BLEManager::setLockout() {
     failedAuthAttempts = 0;
 }
 
+// Check for inactivity timeout
+void BLEManager::checkInactivityTimeout() {
+    unsigned long now = millis();
+    
+    // Check periodically
+    if (now - lastInactivityCheck < INACTIVITY_CHECK_INTERVAL) {
+        return;
+    }
+    lastInactivityCheck = now;
+    
+    if (!pServer || pServer->getConnectedCount() == 0) return;
+    
+    unsigned long idleTime = now - lastActivityMs;
+    
+    // Force disconnect after CONNECTION_TIMEOUT
+    if (idleTime > CONNECTION_TIMEOUT_MS) {
+        Serial.println("TIMEOUT: Connection timeout - forcing disconnect");
+        clearSession();
+        CryptoManager::getInstance().clearECDH();
+        
+        if (pServer) {
+            pServer->disconnect(0);  // Disconnect all clients
+        }
+        
+        delay(100);
+        
+        // Restart advertising
+        BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+        pAdvertising->start();
+        Serial.println("TIMEOUT: Advertising restarted");
+        return;
+    }
+    
+    // Clear session after SESSION_TIMEOUT (but stay connected)
+    if (sessionAuthorized && idleTime > SESSION_TIMEOUT_MS) {
+        Serial.println("TIMEOUT: Session timeout - clearing authorization");
+        clearSession();
+        sendNotification("SESSION_TIMEOUT");
+    }
+}
+
+// Check unpair button (physical button on ESP32)
+void BLEManager::checkUnpairButton() {
+    bool buttonState = digitalRead(UNPAIR_BUTTON_PIN) == LOW;  // Active low (pulled up)
+    
+    if (buttonState && !buttonPressed) {
+        // Button just pressed
+        buttonPressed = true;
+        buttonPressStartTime = millis();
+        Serial.println("UNPAIR BUTTON: Pressed (hold for 3 seconds)");
+    } else if (!buttonState && buttonPressed) {
+        // Button released
+        buttonPressed = false;
+        Serial.println("UNPAIR BUTTON: Released");
+    } else if (buttonPressed) {
+        // Button still held - check if held long enough
+        unsigned long holdTime = millis() - buttonPressStartTime;
+        if (holdTime >= BUTTON_HOLD_TIME_MS) {
+            // Trigger unpair
+            Serial.println("UNPAIR BUTTON: 3 seconds elapsed - unpairing device");
+            UIManager::getInstance().updateOutput("UNPAIR BUTTON");
+            
+            // Clear session
+            clearSession();
+            
+            // Unpair from NVS
+            CryptoManager& crypto = CryptoManager::getInstance();
+            if (crypto.unpairDevice()) {
+                Serial.println("UNPAIR BUTTON: Device unpaired successfully");
+                UIManager::getInstance().updateOutput("Device UNPAIRED");
+                
+                // Disconnect any connected clients
+                if (pServer && pServer->getConnectedCount() > 0) {
+                    sendNotification("UNPAIRED");
+                    delay(100);
+                    pServer->disconnect(0);
+                }
+                
+                // Clear all bonding info from BLE stack
+                int dev_num = esp_ble_get_bond_device_num();
+                if (dev_num > 0) {
+                    esp_ble_bond_dev_t *bond_dev = (esp_ble_bond_dev_t *)malloc(sizeof(esp_ble_bond_dev_t) * dev_num);
+                    if (bond_dev) {
+                        esp_ble_get_bond_device_list(&dev_num, bond_dev);
+                        for (int i = 0; i < dev_num; i++) {
+                            esp_ble_remove_bond_device(bond_dev[i].bd_addr);
+                            Serial.println("UNPAIR BUTTON: Removed BLE bond");
+                        }
+                        free(bond_dev);
+                    }
+                }
+                
+                // Restart advertising
+                delay(500);
+                BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+                pAdvertising->start();
+                Serial.println("UNPAIR BUTTON: Ready for new pairing");
+            } else {
+                Serial.println("UNPAIR BUTTON: Failed to unpair");
+                UIManager::getInstance().updateOutput("Unpair failed");
+            }
+            
+            buttonPressed = false;  // Reset to prevent repeated triggers
+        }
+    }
+}
+
+// Main loop - call from loop()
+void BLEManager::loop() {
+    checkInactivityTimeout();
+    checkUnpairButton();
+}
+
 // Handle command from client
 void BLEManager::handleCommand(String cmdLine) {
     UIManager& ui = UIManager::getInstance();
@@ -338,13 +497,31 @@ void BLEManager::handleCommand(String cmdLine) {
     // Update activity timestamp
     updateActivity();
     
-    // Tokenize by spaces
+    // Tokenize by spaces, supporting quoted strings
     std::vector<String> tokens;
-    char* tok = strtok((char*)cmdLine.c_str(), " ");
-    while (tok != NULL) {
-        tokens.push_back(String(tok));
-        tok = strtok(NULL, " ");
+    bool inQuotes = false;
+    String currentToken = "";
+    
+    for (int i = 0; i < cmdLine.length(); i++) {
+        char c = cmdLine.charAt(i);
+        
+        if (c == '"') {
+            inQuotes = !inQuotes;
+        } else if (c == ' ' && !inQuotes) {
+            if (currentToken.length() > 0) {
+                tokens.push_back(currentToken);
+                currentToken = "";
+            }
+        } else if (c != '\n' && c != '\r') {
+            currentToken += c;
+        }
     }
+    
+    // Add last token
+    if (currentToken.length() > 0) {
+        tokens.push_back(currentToken);
+    }
+    
     if (tokens.size() == 0) return;
     
     String cmd = tokens[0];
@@ -365,13 +542,172 @@ void BLEManager::handleCommand(String cmdLine) {
         return;
     }
     
+    // Status command - returns connection and authorization state
+    if (cmd.equalsIgnoreCase("status")) {
+        String statusMsg = "STATUS ";
+        if (pServer && pServer->getConnectedCount() > 0) {
+            statusMsg += "CONNECTED ";
+            if (sessionAuthorized) {
+                statusMsg += "AUTHORIZED";
+            } else {
+                statusMsg += "UNAUTHORIZED";
+            }
+            // Add pairing status
+            if (crypto.isDevicePaired()) {
+                statusMsg += " PAIRED";
+            } else {
+                statusMsg += " UNPAIRED";
+            }
+        } else {
+            statusMsg += "NOT_CONNECTED";
+        }
+        sendNotification(statusMsg);
+        db.auditLog("STATUS_CHECK", statusMsg);
+        return;
+    }
+    
+    // Check pairing status - allows Flutter to skip ECDH if already paired
+    if (cmd.equalsIgnoreCase("check_pairing")) {
+        if (crypto.isDevicePaired()) {
+            // Return stored client public key so Flutter can verify it matches
+            String clientKeyHex = "";
+            const uint8_t* storedKey = crypto.getStoredClientPublicKey();
+            if (storedKey) {
+                for (int i = 0; i < 64; i++) {
+                    char buf[3];
+                    sprintf(buf, "%02X", storedKey[i]);
+                    clientKeyHex += buf;
+                }
+            }
+            sendNotification("PAIRED:" + clientKeyHex);
+            Serial.println("CHECK_PAIRING: Device is paired");
+        } else {
+            sendNotification("UNPAIRED");
+            Serial.println("CHECK_PAIRING: Device is unpaired");
+        }
+        db.auditLog("CHECK_PAIRING", crypto.isDevicePaired() ? "paired" : "unpaired");
+        return;
+    }
+    
+    // Force disconnect command - allows client to reset connection
+    if (cmd.equalsIgnoreCase("force_disconnect")) {
+        Serial.println("FORCE_DISCONNECT: Client requested disconnect");
+        sendNotification("DISCONNECTING");
+        db.auditLog("FORCE_DISCONNECT", "Client initiated");
+        
+        clearSession();
+        crypto.clearECDH();
+        
+        delay(100);  // Give notification time to send
+        
+        if (pServer) {
+            pServer->disconnect(0);
+        }
+        
+        // Restart advertising
+        delay(500);
+        BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+        pAdvertising->start();
+        Serial.println("FORCE_DISCONNECT: Advertising restarted");
+        return;
+    }
+    
+    // Unpair command - NO AUTH REQUIRED (allows recovery if session lost)
+    if (cmd.equalsIgnoreCase("unpair")) {
+        Serial.println("UNPAIR: Command received (no auth required for recovery)");
+        
+        if (crypto.unpairDevice()) {
+            clearSession();
+            ui.updateOutput("Device unpaired");
+            sendNotification("UNPAIRED");
+            db.auditLog("UNPAIR", "client");
+            
+            // Update ECDH characteristic with new key
+            if (pEcdhCharacteristic) {
+                pEcdhCharacteristic->setValue(const_cast<uint8_t*>(crypto.getEsp32PublicKey()), ECDH_PUBLIC_KEY_SIZE);
+                Serial.println("UNPAIR: ECDH characteristic updated with new key");
+            }
+            
+            // Clear all BLE bonds
+            int dev_num = esp_ble_get_bond_device_num();
+            if (dev_num > 0) {
+                esp_ble_bond_dev_t *bond_dev = (esp_ble_bond_dev_t *)malloc(sizeof(esp_ble_bond_dev_t) * dev_num);
+                if (bond_dev) {
+                    esp_ble_get_bond_device_list(&dev_num, bond_dev);
+                    for (int i = 0; i < dev_num; i++) {
+                        esp_ble_remove_bond_device(bond_dev[i].bd_addr);
+                        Serial.println("UNPAIR: Removed BLE bond");
+                    }
+                    free(bond_dev);
+                }
+            }
+            
+            ui.updateOutput("Device UNPAIRED");
+            
+            delay(100);  // Give notification time to send
+            
+            // Disconnect if connected
+            if (pServer && pServer->getConnectedCount() > 0) {
+                pServer->disconnect(pServer->getConnId());
+                Serial.println("UNPAIR: Disconnected client");
+            }
+            
+            delay(100);
+            
+            // Restart advertising
+            BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+            pAdvertising->start();
+            Serial.println("UNPAIR: Ready for new pairing");
+        } else {
+            sendNotification("UNPAIR_FAIL");
+        }
+        return;
+    }
+    
+    // Database recovery command (no auth required for emergency recovery)
+    if (cmd.equalsIgnoreCase("db_reset")) {
+        Serial.println("DB_RESET: Emergency database reset requested");
+        ui.updateOutput("Resetting database...");
+        
+        // Close database
+        db.close();
+        
+        // Delete database file
+        if (SD.exists("/passwords.db")) {
+            SD.remove("/passwords.db");
+            Serial.println("DB_RESET: Old database deleted");
+        }
+        if (SD.exists("/passwords.db-wal")) {
+            SD.remove("/passwords.db-wal");
+            Serial.println("DB_RESET: WAL file deleted");
+        }
+        if (SD.exists("/passwords.db-shm")) {
+            SD.remove("/passwords.db-shm");
+            Serial.println("DB_RESET: SHM file deleted");
+        }
+        
+        // Reinitialize database
+        if (db.begin("/passwords.db")) {
+            ui.updateOutput("Database reset OK");
+            sendNotification("DB_RESET_OK");
+            db.auditLog("DB_RESET", "emergency");
+            Serial.println("DB_RESET: Database recreated successfully");
+        } else {
+            ui.updateOutput("Database reset FAILED");
+            sendNotification("DB_RESET_FAIL");
+            Serial.println("DB_RESET: Failed to recreate database");
+        }
+        return;
+    }
+    
     if (cmd.equalsIgnoreCase("auth") && tokens.size() == 2) {
         if (tokens[1] == sessionToken && sessionToken.length() > 0) {
             sessionAuthorized = true;
             resetFailedAuth();
+            
             ui.updateOutput("Authenticated");
             sendNotification("AUTH OK");
-            db.auditLog("AUTH_SUCCESS", tokens[1]);
+            db.auditLog("AUTH_SUCCESS", "authorized");
         } else {
             incrementFailedAuth();
             ui.updateOutput("AUTH FAIL (" + String(failedAuthAttempts) + ")");
@@ -438,25 +774,6 @@ void BLEManager::handleCommand(String cmdLine) {
         ui.updateOutput(out);
         sendNotification("LIST:\\n" + out);
         db.auditLog("LIST", "client");
-        return;
-    }
-    
-    if (cmd.equalsIgnoreCase("unpair")) {
-        if (crypto.unpairDevice()) {
-            clearSession();
-            ui.updateOutput("Device unpaired");
-            sendNotification("UNPAIRED");
-            db.auditLog("UNPAIR", "client");
-            // Update ECDH characteristic with new key
-            pEcdhCharacteristic->setValue(const_cast<uint8_t*>(crypto.getEsp32PublicKey()), ECDH_PUBLIC_KEY_SIZE);
-            // Restart advertising for new pairing
-            if (pServer) {
-                pServer->getAdvertising()->start();
-            }
-        } else {
-            ui.updateOutput("Unpair failed");
-            sendNotification("UNPAIR_FAIL");
-        }
         return;
     }
     

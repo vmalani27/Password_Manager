@@ -16,11 +16,17 @@ class CommandService {
   StreamSubscription<List<int>>? _notificationSubscription;
   final _responseController = StreamController<String>.broadcast();
   
+  // Session management
+  String? _sessionId;
+  
   /// Stream of all responses received from ESP32 notification characteristic
   Stream<String> get responseStream => _responseController.stream;
   
   /// Check if we have an active connection
   bool get isConnected => _connectedDeviceId != null;
+  
+  /// Get current session ID if authenticated
+  String? get sessionId => _sessionId;
   
   /// Initialize notification listener after connection
   /// Must be called after successful BLE connection
@@ -33,9 +39,15 @@ class CommandService {
   /// 
   /// This method will NOT throw exceptions during retries - only after all attempts fail
   Future<void> subscribeToNotifications(String deviceId) async {
-    if (_connectedDeviceId == deviceId && _notificationSubscription != null) {
-      debugPrint('[CommandService] Already subscribed to notifications');
-      return;
+    debugPrint('[CommandService] subscribeToNotifications called for $deviceId');
+    debugPrint('[CommandService] Current subscription status: ${_notificationSubscription != null ? "EXISTS" : "NULL"}');
+    debugPrint('[CommandService] Current device: $_connectedDeviceId');
+    
+    // Always cleanup old subscription to prevent stale subscriptions
+    if (_notificationSubscription != null) {
+      debugPrint('[CommandService] Cleaning up old subscription...');
+      await _notificationSubscription?.cancel();
+      _notificationSubscription = null;
     }
     
     _connectedDeviceId = deviceId;
@@ -67,6 +79,13 @@ class CommandService {
             debugPrint('[CommandService] RAW: ${data.length} bytes: $data');
             final response = String.fromCharCodes(data).trim();
             debugPrint('[CommandService] ← Received: "$response"');
+            
+            // Check for SESSION_TIMEOUT notification
+            if (response == Esp32Commands.sessionTimeout) {
+              debugPrint('[CommandService] !!! SESSION TIMEOUT DETECTED !!!');
+              debugPrint('[CommandService] Session expired - need to re-authenticate');
+              // The response will be broadcast to listeners who can handle it
+            }
             
             // Broadcast to response stream
             _responseController.add(response);
@@ -231,6 +250,7 @@ class CommandService {
     await _notificationSubscription?.cancel();
     _notificationSubscription = null;
     _connectedDeviceId = null;
+    _sessionId = null;
   }
   
   /// Dispose of all resources
@@ -258,6 +278,14 @@ class CommandService {
     debugPrint('[ECDH] STARTING HANDSHAKE');
     debugPrint('[ECDH] Device: $deviceName ($deviceId)');
     debugPrint('[ECDH] ========================================');
+    
+    // Verify notification subscription is active
+    if (_notificationSubscription == null) {
+      throw Exception('Cannot perform ECDH: notification subscription not active. Call subscribeToNotifications first.');
+    }
+    
+    debugPrint('[ECDH] Notification subscription status: ACTIVE');
+    debugPrint('[ECDH] Response stream has listeners: ${_responseController.hasListener}');
     
     final pairingService = PairingService();
     final ecdh = EcdhService();
@@ -368,9 +396,13 @@ class CommandService {
       }
       
       // Give ESP32 time to process and send notification
-      await Future.delayed(const Duration(milliseconds: 200));
+      debugPrint('[ECDH] Waiting 300ms for ESP32 to process and send notification...');
+      await Future.delayed(const Duration(milliseconds: 300));
       
       debugPrint('[ECDH] Write complete, waiting for ECDH response via notification characteristic...');
+      debugPrint('[ECDH] Completer status: ${completer.isCompleted ? "COMPLETED" : "WAITING"}');
+      debugPrint('[ECDH] Subscription paused: ${subscription.isPaused}');
+      debugPrint('[ECDH] Notification subscription active: ${_notificationSubscription != null}');
       
       // Wait for ECDH response
       final response = await completer.future;
@@ -442,31 +474,146 @@ class CommandService {
   Future<void> unpairDevice() async {
     try {
       debugPrint('[ECDH] Sending unpair command...');
-      final response = await sendCommand(Esp32Commands.unpair);
       
-      if (response != Esp32Commands.unpaired) {
-        debugPrint('[ECDH] Unexpected unpair response: $response');
-      } else {
-        debugPrint('[ECDH] ESP32 confirmed unpaired');
-      }
+      // Don't wait for response - ESP32 will disconnect immediately
+      // The connection drop is the confirmation
+      await sendCommand(
+        Esp32Commands.unpair,
+        waitForResponse: false, // Don't wait - connection will drop
+      );
       
-      // Remove local pairing data regardless of ESP32 response
+      debugPrint('[ECDH] Unpair command sent (connection will drop)');
+      
+      // Give ESP32 a moment to process before we clean up locally
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      // Remove local pairing data - this is the critical part
       final pairingService = PairingService();
       await pairingService.removePairing();
-      debugPrint('[ECDH] Local pairing data removed');
+      debugPrint('[ECDH] Local pairing data removed successfully');
       
     } catch (e) {
       debugPrint('[ECDH] Unpair error: $e');
       // Still try to remove local data even if ESP32 command fails
       final pairingService = PairingService();
-      await pairingService.removePairing();
+      try {
+        await pairingService.removePairing();
+        debugPrint('[ECDH] Local pairing data removed (despite error)');
+      } catch (e2) {
+        debugPrint('[ECDH] Failed to remove local pairing data: $e2');
+      }
       rethrow;
     }
+  }
+  
+  /// Optimized reconnection: Check pairing first, skip ECDH if valid
+  /// Returns ecdh service, whether it's new pairing, and whether ECDH was skipped
+  Future<({EcdhService? ecdh, bool isNewPairing, bool skippedEcdh})> performOptimizedReconnection(
+    String deviceId,
+    String deviceName,
+  ) async {
+    debugPrint('[ECDH] ========================================');
+    debugPrint('[ECDH] STARTING OPTIMIZED RECONNECTION');
+    debugPrint('[ECDH] ========================================');
+    
+    final pairingService = PairingService();
+    
+    try {
+      // Step 1: Check if we have local pairing data
+      final pairedDevice = await pairingService.getPairedDevice();
+      final isAlreadyPaired = pairedDevice?.deviceId == deviceId;
+      
+      if (!isAlreadyPaired || pairedDevice == null) {
+        debugPrint('[ECDH] No local pairing found - doing full ECDH handshake');
+        final result = await performEcdhHandshake(deviceId, deviceName);
+        return (ecdh: result.ecdh, isNewPairing: result.isNewPairing, skippedEcdh: false);
+      }
+      
+      debugPrint('[ECDH] Local pairing exists - checking ESP32 pairing status...');
+      
+      // Step 2: Send check_pairing command to ESP32
+      debugPrint('[ECDH] Sending check_pairing command to ESP32...');
+      final response = await sendCommand(
+        Esp32Commands.checkPairing,
+        timeout: const Duration(seconds: 5),
+      );
+      
+      debugPrint('[ECDH] ESP32 pairing status response: "$response"');
+      debugPrint('[ECDH] Response starts with PAIRED: ${response.startsWith(Esp32Commands.pairedPrefix)}');
+      debugPrint('[ECDH] Response equals UNPAIRED: ${response == Esp32Commands.unpaired}');
+      
+      if (response.startsWith(Esp32Commands.pairedPrefix)) {
+        // Step 3: Extract stored client public key from ESP32
+        final storedKeyHex = response.substring(Esp32Commands.pairedPrefix.length).trim();
+        debugPrint('[ECDH] ESP32 stored key (first 20 chars): ${storedKeyHex.substring(0, 20)}...');
+        
+        // Step 4: Compare with our saved public key
+        final ourPublicKeyHex = _bytesToHex(pairedDevice.clientPublicKey).toUpperCase();
+        debugPrint('[ECDH] Our saved key (first 20 chars): ${ourPublicKeyHex.substring(0, 20)}...');
+        
+        if (storedKeyHex.toUpperCase() == ourPublicKeyHex) {
+          // Keys match! Pairing is valid - skip ECDH handshake
+          debugPrint('[ECDH] Pairing verified! Keys match - skipping ECDH handshake');
+          debugPrint('[ECDH] Fast reconnection mode activated');
+          
+          // Create ECDH service and load saved keys
+          final ecdh = EcdhService();
+          ecdh.loadKeyPair(pairedDevice.clientPrivateKey, pairedDevice.clientPublicKey);
+          ecdh.computeSharedSecret(pairedDevice.esp32PublicKey);
+          
+          debugPrint('[ECDH] ========================================');
+          debugPrint('[ECDH] OPTIMIZED RECONNECTION COMPLETE');
+          debugPrint('[ECDH] Time saved: ~2 seconds (skipped ECDH handshake)');
+          debugPrint('[ECDH] ========================================');
+          
+          return (ecdh: ecdh, isNewPairing: false, skippedEcdh: true);
+          
+        } else {
+          // Keys don't match - pairing corrupted
+          debugPrint('[ECDH] Pairing mismatch detected!');
+          debugPrint('[ECDH] ESP32 key != Our saved key');
+          debugPrint('[ECDH] Falling back to full ECDH handshake...');
+        }
+        
+      } else if (response == Esp32Commands.unpaired) {
+        debugPrint('[ECDH] ESP32 reports UNPAIRED - doing full handshake');
+      } else {
+        debugPrint('[ECDH] Unexpected response: $response - doing full handshake');
+      }
+      
+      // Step 5: Fallback to full ECDH handshake
+      debugPrint('[ECDH] Performing full ECDH handshake...');
+      final result = await performEcdhHandshake(deviceId, deviceName);
+      return (ecdh: result.ecdh, isNewPairing: result.isNewPairing, skippedEcdh: false);
+      
+    } catch (e, stackTrace) {
+      debugPrint('[ECDH] ========================================');
+      debugPrint('[ECDH] OPTIMIZED RECONNECTION FAILED');
+      debugPrint('[ECDH] Error: $e');
+      debugPrint('[ECDH] Stack trace: $stackTrace');
+      debugPrint('[ECDH] ========================================');
+      
+      // On error, try full ECDH handshake
+      debugPrint('[ECDH] Falling back to full ECDH handshake...');
+      try {
+        final result = await performEcdhHandshake(deviceId, deviceName);
+        return (ecdh: result.ecdh, isNewPairing: result.isNewPairing, skippedEcdh: false);
+      } catch (e2) {
+        rethrow;
+      }
+    }
+  }
+  
+  /// Helper to convert bytes to hex string
+  String _bytesToHex(Uint8List bytes) {
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join('');
   }
   
   /// Authenticate using standard token-based session authentication
   /// This is separate from ECDH pairing - ECDH handles device binding,
   /// token auth handles session authorization for commands
+  /// 
+  /// NEW: Returns session ID for future resume capability
   Future<bool> authenticateWithToken() async {
     debugPrint('[Auth] ===== STARTING TOKEN AUTHENTICATION =====');
     
@@ -502,8 +649,17 @@ class CommandService {
       );
       debugPrint('[Auth] Step 3/3: Auth response: "$authResult"');
       
-      // 4. Check result: AUTH OK or AUTH FAIL
-      if (authResult == Esp32Commands.authOk) {
+      // 4. Check result: AUTH OK:<session_id> or AUTH OK (legacy) or AUTH FAIL
+      if (authResult.startsWith(Esp32Commands.authOkPrefix)) {
+        // New format: AUTH OK:<32-char-hex-session-id>
+        _sessionId = authResult.substring(Esp32Commands.authOkPrefix.length).trim();
+        debugPrint('[Auth] Session ID stored: $_sessionId');
+        debugPrint('[Auth] ===== TOKEN AUTHENTICATION SUCCESS =====');
+        return true;
+      } else if (authResult == Esp32Commands.authOk) {
+        // Legacy format: AUTH OK (no session ID)
+        debugPrint('[Auth] Legacy AUTH OK response (no session ID)');
+        _sessionId = null;
         debugPrint('[Auth] ===== TOKEN AUTHENTICATION SUCCESS =====');
         return true;
       } else if (authResult == Esp32Commands.authFail) {
@@ -520,4 +676,86 @@ class CommandService {
       rethrow;
     }
   }
+  
+  /// Check device session status without authentication
+  /// Returns: STATUS CONNECTED AUTHORIZED / STATUS CONNECTED UNAUTHORIZED / STATUS NOT_CONNECTED
+  Future<String> getStatus() async {
+    debugPrint('[Session] Checking device status...');
+    
+    try {
+      final response = await sendCommand(
+        Esp32Commands.status,
+        timeout: const Duration(seconds: 5),
+      );
+      
+      debugPrint('[Session] Status response: "$response"');
+      return response;
+      
+    } catch (e) {
+      debugPrint('[Session] Status check failed: $e');
+      rethrow;
+    }
+  }
+  
+  /// Force ESP32 to disconnect and reset session
+  /// Use this instead of graceful disconnect to ensure ESP32 cleans up properly
+  Future<void> forceDisconnect() async {
+    debugPrint('[Session] Sending force_disconnect command...');
+    
+    try {
+      final response = await sendCommand(
+        Esp32Commands.forceDisconnect,
+        timeout: const Duration(seconds: 5),
+      );
+      
+      debugPrint('[Session] Force disconnect response: "$response"');
+      
+      if (response == Esp32Commands.disconnecting) {
+        debugPrint('[Session] ESP32 confirmed disconnect');
+      } else {
+        debugPrint('[Session] Unexpected response: "$response"');
+      }
+      
+    } catch (e) {
+      debugPrint('[Session] Force disconnect failed: $e');
+      // Not critical - device will timeout anyway
+    }
+  }
+  
+  /// Resume session using saved session ID
+  /// Returns true if session resumed successfully, false otherwise
+  Future<bool> resumeSession(String sessionId) async {
+    debugPrint('[Session] ===== RESUMING SESSION =====');
+    debugPrint('[Session] Session ID: $sessionId');
+    
+    try {
+      final response = await sendCommand(
+        Esp32Commands.resume(sessionId),
+        timeout: const Duration(seconds: 5),
+      );
+      
+      debugPrint('[Session] Resume response: "$response"');
+      
+      if (response == Esp32Commands.resumeOk) {
+        _sessionId = sessionId;
+        debugPrint('[Session] ===== SESSION RESUMED SUCCESSFULLY =====');
+        return true;
+      } else if (response == Esp32Commands.resumeFail) {
+        debugPrint('[Session] Session resume failed - session ID invalid or expired');
+        _sessionId = null;
+        return false;
+      } else {
+        debugPrint('[Session] Unexpected resume response: "$response"');
+        _sessionId = null;
+        return false;
+      }
+      
+    } catch (e) {
+      debugPrint('[Session] ===== SESSION RESUME FAILED =====');
+      debugPrint('[Session] Error: $e');
+      _sessionId = null;
+      return false;
+    }
+  }
+  
 }

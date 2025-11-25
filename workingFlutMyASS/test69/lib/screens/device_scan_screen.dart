@@ -3,20 +3,33 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/device_scan_provider.dart';
 
 /// Device scan screen - discovers and connects to ESP32 devices
-class DeviceScanScreen extends ConsumerWidget {
+class DeviceScanScreen extends ConsumerStatefulWidget {
   const DeviceScanScreen({Key? key}) : super(key: key);
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final scanState = ref.watch(deviceScanProvider);
-    final scanNotifier = ref.read(deviceScanProvider.notifier);
-    
-    // Start scan on first build
-    ref.listen(deviceScanProvider, (previous, next) {
-      if (previous == null && next.devices.isEmpty && !next.isScanning) {
-        Future.microtask(() => scanNotifier.startScan());
+  ConsumerState<DeviceScanScreen> createState() => _DeviceScanScreenState();
+}
+
+class _DeviceScanScreenState extends ConsumerState<DeviceScanScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Start scan when screen is first loaded
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final scanNotifier = ref.read(deviceScanProvider.notifier);
+      final scanState = ref.read(deviceScanProvider);
+      
+      // Only start scan if not already scanning and no devices found
+      if (!scanState.isScanning && scanState.devices.isEmpty) {
+        scanNotifier.startScan();
       }
     });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scanState = ref.watch(deviceScanProvider);
+    final scanNotifier = ref.read(deviceScanProvider.notifier);
 
     return Scaffold(
       appBar: AppBar(
@@ -205,28 +218,161 @@ class DeviceScanScreen extends ConsumerWidget {
   }
 
   Future<void> _handleDeviceConnect(BuildContext context, device, DeviceScanNotifier notifier) async {
+    debugPrint('[DeviceScanScreen] ========================================');
+    debugPrint('[DeviceScanScreen] Starting device connection...');
+    debugPrint('[DeviceScanScreen] Device: ${device.name} (${device.id})');
+    
+    // Capture the navigator before the async operation
+    final navigator = Navigator.of(context);
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    
     try {
+      debugPrint('[DeviceScanScreen] Calling connectToDevice...');
       final isNewPairing = await notifier.connectToDevice(device);
+      debugPrint('[DeviceScanScreen] connectToDevice completed successfully');
+      debugPrint('[DeviceScanScreen] isNewPairing: $isNewPairing');
       
-      if (context.mounted) {
-        // Show feedback based on pairing status
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isNewPairing 
-                  ? 'Device paired successfully!' 
-                  : 'Reconnected to paired device'
-            ),
-            backgroundColor: isNewPairing ? Colors.green : null,
-            duration: Duration(seconds: isNewPairing ? 3 : 2),
+      // Use captured messenger and navigator instead of checking context.mounted
+      debugPrint('[DeviceScanScreen] Showing SnackBar...');
+      scaffoldMessenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            isNewPairing 
+                ? 'Device paired successfully!' 
+                : 'Reconnected to paired device'
           ),
-        );
-        
-        // Success - pop back to home screen
-        Navigator.pop(context);
-      }
+          backgroundColor: isNewPairing ? Colors.green : null,
+          duration: const Duration(seconds: 1),
+        ),
+      );
+      
+      debugPrint('[DeviceScanScreen] SnackBar shown, waiting 500ms...');
+      // Small delay to ensure snackbar is visible
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      // Navigate back using captured navigator
+      debugPrint('[DeviceScanScreen] Calling navigator.pop to return to home screen...');
+      navigator.pop();
+      debugPrint('[DeviceScanScreen] Navigation completed');
+      debugPrint('[DeviceScanScreen] ========================================');
+      
     } catch (e) {
+      debugPrint('[DeviceScanScreen] ========================================');
+      debugPrint('[DeviceScanScreen] Connection failed with error: $e');
+      
+      // Check if it's a "already paired" error
+      final errorString = e.toString();
+      if (errorString.contains('already paired with a different device')) {
+        debugPrint('[DeviceScanScreen] Detected ESP32 already paired error - showing guidance dialog');
+        if (context.mounted) {
+          _showAlreadyPairedDialog(context);
+        }
+      }
+      
+      debugPrint('[DeviceScanScreen] ========================================');
       // Error already set in provider state
     }
+  }
+
+  void _showAlreadyPairedDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange[700], size: 28),
+            const SizedBox(width: 12),
+            const Text('ESP32 Already Paired'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'The ESP32 is already paired with another device or has old pairing data.',
+              style: TextStyle(fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 16),
+            const Text('To fix this, you need to:'),
+            const SizedBox(height: 12),
+            _buildStep('1', 'Go back to the home screen'),
+            _buildStep('2', 'Find the "Repair Device" section'),
+            _buildStep('3', 'Press the "Unpair Device" button'),
+            _buildStep('4', 'Return here and scan again'),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, color: Colors.blue.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'This will clear old pairing data from both devices.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context); // Close dialog
+              Navigator.pop(context); // Go back to home screen
+            },
+            child: const Text('Go to Home Screen'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStep(String number, String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              color: Colors.blue.shade700,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                number,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(text),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
