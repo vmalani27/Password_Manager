@@ -2,8 +2,8 @@ import 'package:equatable/equatable.dart';
 
 /// Represents a single credential stored on the ESP32
 class Credential extends Equatable {
-    // For UI compatibility: treat identifier as username
-    String get username => identifier;
+  // For UI compatibility: treat identifier as username
+  String get username => identifier;
   final String service;
   final String identifier;
   final String password;

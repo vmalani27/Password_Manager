@@ -17,6 +17,41 @@ class CredentialManagerScreen extends ConsumerStatefulWidget {
 }
 
 class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScreen> with WidgetsBindingObserver {
+  // Heartbeat test to check connection
+  Future<bool> _heartbeatTest() async {
+    final notifier = ref.read(appStateProvider.notifier);
+    final appState = ref.read(appStateProvider);
+    if (appState.connectedDeviceId != null) {
+      try {
+        return await notifier.bleService.isDeviceConnected(appState.connectedDeviceId!);
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  // WillPop handler for connection check
+  Future<bool> _onWillPop() async {
+    final isConnected = await _heartbeatTest();
+    if (!isConnected && context.mounted) {
+      await showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Connection Lost'),
+          content: const Text('Connection to ESP32 is no longer active. Please reconnect or go to device discovery.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -54,105 +89,102 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
   Widget build(BuildContext context) {
     final appState = ref.watch(appStateProvider);
     final notifier = ref.read(appStateProvider.notifier);
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Credentials'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => notifier.refreshCredentials(),
-            tooltip: 'Refresh',
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          if (appState.connectionState == app_conn.ConnectionState.disconnected || appState.authState == AuthState.unauthenticated)
-            Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+    return WillPopScope(
+      onWillPop: _onWillPop,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Credentials'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: () => notifier.refreshCredentials(),
+              tooltip: 'Refresh',
+            ),
+          ],
+        ),
+        body: Stack(
+          children: [
+            if (appState.connectionState == app_conn.ConnectionState.disconnected || appState.authState == AuthState.unauthenticated)
+              Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.bluetooth_disabled, size: 64, color: Colors.grey),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Not connected to device',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Please connect to your ESP32 to view credentials.',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ],
+                ),
+              )
+            else
+              Column(
                 children: [
-                  Icon(Icons.bluetooth_disabled, size: 64, color: Colors.grey),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Not connected to device',
-                    style: Theme.of(context).textTheme.titleLarge,
+                  if (appState.isLoading)
+                    const LinearProgressIndicator(),
+                  if (appState.errorMessage != null && appState.isReady)
+                    Container(
+                      color: Colors.red.shade50,
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          Icon(Icons.error_outline, color: Colors.red.shade700),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              appState.errorMessage!,
+                              style: TextStyle(color: Colors.red.shade700),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: () => notifier.clearError(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Text(
+                      '${appState.credentials.length} credential(s) stored',
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Please connect to your ESP32 to view credentials.',
-                    style: Theme.of(context).textTheme.bodyMedium,
+                  Expanded(
+                    child: appState.credentials.isEmpty
+                        ? const Center(
+                            child: Text('No credentials stored.\nTap + to add one.'),
+                          )
+                        : ListView.builder(
+                            itemCount: appState.credentials.length,
+                            itemBuilder: (context, index) {
+                              final credential = appState.credentials[index];
+                              return _buildCredentialTile(context, credential, notifier);
+                            },
+                          ),
                   ),
                 ],
               ),
-            )
-          else
-            Column(
-              children: [
-                // Loading indicator
-                if (appState.isLoading)
-                  const LinearProgressIndicator(),
-                // Error message
-                if (appState.errorMessage != null && appState.isReady)
-                  Container(
-                    color: Colors.red.shade50,
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(16),
-                    child: Row(
-                      children: [
-                        Icon(Icons.error_outline, color: Colors.red.shade700),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            appState.errorMessage!,
-                            style: TextStyle(color: Colors.red.shade700),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close),
-                          onPressed: () => notifier.clearError(),
-                        ),
-                      ],
-                    ),
-                  ),
-                // Credential count
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text(
-                    '${appState.credentials.length} credential(s) stored',
-                    style: Theme.of(context).textTheme.bodyLarge,
-                  ),
-                ),
-                // Credential list
-                Expanded(
-                  child: appState.credentials.isEmpty
-                      ? const Center(
-                          child: Text('No credentials stored.\nTap + to add one.'),
-                        )
-                      : ListView.builder(
-                          itemCount: appState.credentials.length,
-                          itemBuilder: (context, index) {
-                            final credential = appState.credentials[index];
-                            return _buildCredentialTile(context, credential, notifier);
-                          },
-                        ),
-                ),
-              ],
-            ),
-          // Session timeout lock screen overlay
-          if (!appState.isReady && appState.errorMessage != null && 
-              appState.errorMessage!.contains('Session expired'))
-            buildSessionLockOverlay(context, notifier, appState),
-        ],
+            if (!appState.isReady && appState.errorMessage != null && 
+                appState.errorMessage!.contains('Session expired'))
+              buildSessionLockOverlay(context, notifier, appState),
+          ],
+        ),
+        floatingActionButton: (appState.connectionState == app_conn.ConnectionState.authenticated && appState.authState == AuthState.authenticated)
+            ? FloatingActionButton(
+                onPressed: () => _showAddCredentialDialog(context, notifier),
+                child: const Icon(Icons.add),
+                tooltip: 'Add Credential',
+              )
+            : null,
       ),
-      floatingActionButton: (appState.connectionState == app_conn.ConnectionState.authenticated && appState.authState == AuthState.authenticated)
-          ? FloatingActionButton(
-              onPressed: () => _showAddCredentialDialog(context, notifier),
-              child: const Icon(Icons.add),
-              tooltip: 'Add Credential',
-            )
-          : null,
     );
   }
 
@@ -265,14 +297,33 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
       }
     } catch (e) {
       if (context.mounted) {
-        // Extract meaningful error message
-        final errorMsg = e.toString().replaceFirst('Exception: ', '');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMsg),
-            backgroundColor: Colors.red,
-          ),
-        );
+        final errorMsg = e.toString();
+        if (errorMsg.contains('SESSION_TIMEOUT') || errorMsg.contains('NOT AUTHORIZED')) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Session Expired'),
+              content: const Text('Your session has expired or you have been unpaired from the device. Please reconnect or discover a new device.'),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    Navigator.of(context).pushReplacementNamed('/deviceScan');
+                  },
+                  child: const Text('Go to Device Discovery'),
+                ),
+              ],
+            ),
+          );
+        } else {
+          final msg = errorMsg.replaceFirst('Exception: ', '');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(msg),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
@@ -284,40 +335,53 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
     final serviceController = TextEditingController();
     final identifierController = TextEditingController();
     final passwordController = TextEditingController();
+    bool passwordVisible = false;
 
     final result = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Add Credential'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: serviceController,
-              decoration: const InputDecoration(labelText: 'Service'),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) => AlertDialog(
+            title: const Text('Add Credential'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: serviceController,
+                  decoration: const InputDecoration(labelText: 'Service'),
+                ),
+                TextField(
+                  controller: identifierController,
+                  decoration: const InputDecoration(labelText: 'Username'),
+                ),
+                TextField(
+                  controller: passwordController,
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        passwordVisible ? Icons.visibility : Icons.visibility_off,
+                      ),
+                      onPressed: () => setState(() => passwordVisible = !passwordVisible),
+                    ),
+                  ),
+                  obscureText: !passwordVisible,
+                ),
+              ],
             ),
-            TextField(
-              controller: identifierController,
-              decoration: const InputDecoration(labelText: 'Identifier'),
-            ),
-            TextField(
-              controller: passwordController,
-              decoration: const InputDecoration(labelText: 'Password'),
-              obscureText: true,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Add'),
+              ),
+            ],
           ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+        );
+      },
     );
 
     if (result == true) {
@@ -335,14 +399,33 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
         }
       } catch (e) {
         if (context.mounted) {
-          // Extract meaningful error message
-          final errorMsg = e.toString().replaceFirst('Exception: ', '');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(errorMsg),
-              backgroundColor: Colors.red,
-            ),
-          );
+          final errorMsg = e.toString();
+          if (errorMsg.contains('SESSION_TIMEOUT') || errorMsg.contains('NOT AUTHORIZED')) {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Session Expired'),
+                content: const Text('Your session has expired or you have been unpaired from the device. Please reconnect or discover a new device.'),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      Navigator.of(context).pushReplacementNamed('/deviceScan');
+                    },
+                    child: const Text('Go to Device Discovery'),
+                  ),
+                ],
+              ),
+            );
+          } else {
+            final msg = errorMsg.replaceFirst('Exception: ', '');
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(msg),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
         }
       }
     }
@@ -401,14 +484,33 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
         }
       } catch (e) {
         if (context.mounted) {
-          // Extract meaningful error message
-          final errorMsg = e.toString().replaceFirst('Exception: ', '');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(errorMsg),
-              backgroundColor: Colors.red,
-            ),
-          );
+          final errorMsg = e.toString();
+          if (errorMsg.contains('SESSION_TIMEOUT') || errorMsg.contains('NOT AUTHORIZED')) {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Session Expired'),
+                content: const Text('Your session has expired or you have been unpaired from the device. Please reconnect or discover a new device.'),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      Navigator.of(context).pushReplacementNamed('/deviceScan');
+                    },
+                    child: const Text('Go to Device Discovery'),
+                  ),
+                ],
+              ),
+            );
+          } else {
+            final msg = errorMsg.replaceFirst('Exception: ', '');
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(msg),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
         }
       }
     }
@@ -452,14 +554,33 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
         }
       } catch (e) {
         if (context.mounted) {
-          // Extract meaningful error message
-          final errorMsg = e.toString().replaceFirst('Exception: ', '');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(errorMsg),
-              backgroundColor: Colors.red,
-            ),
-          );
+          final errorMsg = e.toString();
+          if (errorMsg.contains('SESSION_TIMEOUT') || errorMsg.contains('NOT AUTHORIZED')) {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Session Expired'),
+                content: const Text('Your session has expired or you have been unpaired from the device. Please reconnect or discover a new device.'),
+                actions: [
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      Navigator.of(context).pushReplacementNamed('/deviceScan');
+                    },
+                    child: const Text('Go to Device Discovery'),
+                  ),
+                ],
+              ),
+            );
+          } else {
+            final msg = errorMsg.replaceFirst('Exception: ', '');
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(msg),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
         }
       }
     }

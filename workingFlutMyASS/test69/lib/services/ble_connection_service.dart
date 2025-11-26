@@ -207,6 +207,15 @@ class BleConnectionService {
         // Give ESP32 time to stabilize
         await Future.delayed(Duration(milliseconds: 500));
         
+          // Wait for bonding to complete (placeholder logic)
+          // TODO: Replace with actual bonded state check if available from BLE library
+          debugPrint('[BleConnection] Waiting for BLE bonding to complete...');
+          await Future.delayed(const Duration(seconds: 2)); // Increase delay for bonding
+          // If you can check bonded state, poll until bonded
+          // while (!await isBonded(deviceId)) {
+          //   await Future.delayed(const Duration(milliseconds: 200));
+          // }
+
         // Subscribe to notifications for status check
         debugPrint('[BleConnection] Setting up notifications for status check...');
         await _commandService.subscribeToNotifications(deviceId);
@@ -397,45 +406,33 @@ class BleConnectionService {
       
       isConnecting = false; // Mark that initial connection is done
       debugPrint('[BleConnection] isConnecting set to false');
-      
-      // Add delay to let connection stabilize before MTU negotiation
-      debugPrint('[BleConnection] Waiting 1000ms for connection stabilization...');
-      await Future.delayed(const Duration(milliseconds: 1000));
-      
-      // Now request MTU after connection is established
-      // ESP32 code: BLEDevice::setMTU(256);
-      debugPrint('[BleConnection] Starting MTU negotiation...');
-      try {
-        await _requestMtu(deviceId);
-        debugPrint('[BleConnection] MTU negotiation complete');
-      } catch (e) {
-        debugPrint('[BleConnection] MTU negotiation failed (non-fatal): $e');
-        // Continue anyway - MTU negotiation failure shouldn't kill connection
-      }
-      
+      // Reduce stabilization delay and parallelize MTU negotiation and notification subscription
+      debugPrint('[BleConnection] Waiting 300ms for connection stabilization...');
+      await Future.delayed(const Duration(milliseconds: 300));
+      debugPrint('[BleConnection] Starting MTU negotiation and notification subscription in parallel...');
+      await Future.wait([
+        _requestMtu(deviceId),
+        subscribeToNotifications(deviceId),
+      ]);
+      debugPrint('[BleConnection] MTU negotiation and notification subscription complete');
       debugPrint('[BleConnection] ========================================');
       debugPrint('[BleConnection] CONNECT() SUCCESSFUL');
       debugPrint('[BleConnection] ========================================');
-      
     } catch (e, stackTrace) {
       debugPrint('[BleConnection] ========================================');
       debugPrint('[BleConnection] CONNECT() FAILED (attempt ${retryCount + 1})');
       debugPrint('[BleConnection] Error: $e');
       debugPrint('[BleConnection] ========================================');
-      
       // Retry once on first failure (common with Android bonding)
       if (retryCount == 0 && e.toString().contains('Disconnected before connection established')) {
         debugPrint('[BleConnection] First connection failed - this is common with Android bonding');
-        debugPrint('[BleConnection] Retrying connection in 2 seconds...');
-        
+        debugPrint('[BleConnection] Retrying connection in 700ms...');
         // Clean up
         await _connectionSubscription?.cancel();
         _connectionSubscription = null;
         _connectedDeviceId = null;
-        
         // Wait before retry
-        await Future.delayed(const Duration(seconds: 2));
-        
+        await Future.delayed(const Duration(milliseconds: 700));
         // Retry
         return connect(deviceId, deviceName: deviceName, retryCount: 1);
       }

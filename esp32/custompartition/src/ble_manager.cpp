@@ -3,6 +3,8 @@
 #include "ui_manager.h"
 #include "db_manager.h"
 #include "esp_system.h"
+#include "secure_core.h"
+#include "mbedtls/base64.h"
 #include <vector>
 
 // ============================================================================
@@ -322,8 +324,6 @@ bool BLEManager::begin() {
 
 // Send notification to client
 void BLEManager::sendNotification(const String& data) {
-    Serial.println("DEBUG: sendNotification called with: " + data);
-    
     if (!pCharacteristic) {
         UIManager::getInstance().updateOutput("pCharacteristic is null.");
         return;
@@ -334,12 +334,46 @@ void BLEManager::sendNotification(const String& data) {
     }
     
     int connectedCount = pServer->getConnectedCount();
-    Serial.println("DEBUG: Connected clients: " + String(connectedCount));
     
     if (connectedCount > 0) {
-        pCharacteristic->setValue(data.c_str());
-        pCharacteristic->notify();
-        Serial.println("DEBUG: Notification sent: " + data);
+        // Encrypt response if session is active
+        CryptoManager& crypto = CryptoManager::getInstance();
+        if (crypto.isEcdhReady()) {
+            // Encrypt with session key (AES-256-CTR)
+            uint8_t ciphertext[MAX_SESSION_ENCRYPTED_SIZE];
+            uint8_t nonce[NONCE_SIZE];
+            size_t ciphertext_len;
+            
+            const uint8_t* session_key = crypto.getSessionKey();
+            if (encrypt_session(session_key, (const uint8_t*)data.c_str(), data.length(),
+                              ciphertext, &ciphertext_len, nonce)) {
+                // Base64 encode: nonce (16 bytes) + ciphertext
+                size_t total_len = NONCE_SIZE + ciphertext_len;
+                uint8_t combined[MAX_SESSION_ENCRYPTED_SIZE + NONCE_SIZE];
+                memcpy(combined, nonce, NONCE_SIZE);
+                memcpy(combined + NONCE_SIZE, ciphertext, ciphertext_len);
+                
+                // Base64 encode
+                size_t base64_len;
+                unsigned char base64_buf[MAX_SESSION_ENCRYPTED_SIZE * 2];
+                if (mbedtls_base64_encode(base64_buf, sizeof(base64_buf), &base64_len,
+                                         combined, total_len) == 0) {
+                    String encrypted_response = "ENC:" + String((char*)base64_buf);
+                    pCharacteristic->setValue(encrypted_response.c_str());
+                    pCharacteristic->notify();
+                    Serial.println("BLE: Encrypted notification sent (" + String(base64_len) + " bytes)");
+                } else {
+                    Serial.println("ERROR: Base64 encoding failed");
+                }
+            } else {
+                Serial.println("ERROR: Session encryption failed");
+            }
+        } else {
+            // No session key - send plaintext (for public commands like ECDH_OK)
+            pCharacteristic->setValue(data.c_str());
+            pCharacteristic->notify();
+            Serial.println("BLE: Plaintext notification sent: " + data);
+        }
         delay(10);
     } else {
         UIManager::getInstance().updateOutput("No BLE client connected.");
@@ -491,6 +525,50 @@ void BLEManager::handleCommand(String cmdLine) {
     UIManager& ui = UIManager::getInstance();
     DBManager& db = DBManager::getInstance();
     CryptoManager& crypto = CryptoManager::getInstance();
+    
+    // Decrypt command if session is active and command is encrypted
+    if (crypto.isEcdhReady() && cmdLine.startsWith("ENC:")) {
+        String encrypted_data = cmdLine.substring(4);  // Remove "ENC:" prefix
+        
+        // Base64 decode
+        size_t decoded_len;
+        unsigned char decoded_buf[MAX_SESSION_ENCRYPTED_SIZE + NONCE_SIZE];
+        if (mbedtls_base64_decode(decoded_buf, sizeof(decoded_buf), &decoded_len,
+                                 (const unsigned char*)encrypted_data.c_str(),
+                                 encrypted_data.length()) == 0) {
+            // Extract nonce (first 16 bytes) and ciphertext (rest)
+            if (decoded_len > NONCE_SIZE) {
+                uint8_t nonce[NONCE_SIZE];
+                memcpy(nonce, decoded_buf, NONCE_SIZE);
+                
+                uint8_t* ciphertext = decoded_buf + NONCE_SIZE;
+                size_t ciphertext_len = decoded_len - NONCE_SIZE;
+                
+                // Decrypt with session key
+                uint8_t plaintext[MAX_SESSION_ENCRYPTED_SIZE];
+                size_t plaintext_len;
+                const uint8_t* session_key = crypto.getSessionKey();
+                
+                if (decrypt_session(session_key, ciphertext, ciphertext_len,
+                                  nonce, plaintext, &plaintext_len)) {
+                    cmdLine = String((char*)plaintext);
+                    Serial.println("BLE: Command decrypted successfully");
+                } else {
+                    Serial.println("ERROR: Command decryption failed");
+                    sendNotification("DECRYPT_FAIL");
+                    return;
+                }
+            } else {
+                Serial.println("ERROR: Encrypted command too short");
+                sendNotification("INVALID_FORMAT");
+                return;
+            }
+        } else {
+            Serial.println("ERROR: Base64 decode failed");
+            sendNotification("DECODE_FAIL");
+            return;
+        }
+    }
     
     ui.updateOutput("Processing: " + cmdLine);
     
@@ -741,8 +819,10 @@ void BLEManager::handleCommand(String cmdLine) {
         String pw = db.getPassword(tokens[1], tokens[2]);
         if (pw.length()) {
             String resp = "Password: " + pw;
-            ui.updateOutput(resp);
-            sendNotification(resp);
+            // SECURITY: Never log actual password to Serial
+            ui.updateOutput("Password retrieved successfully");
+            Serial.println("BLE: Password retrieved for " + tokens[1] + "/" + tokens[2]);
+            sendNotification(resp);  // Encrypted by sendNotification
             db.auditLog("GET", tokens[2]);
         } else {
             ui.updateOutput("Entry not found");

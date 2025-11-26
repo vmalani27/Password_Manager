@@ -6,6 +6,7 @@ import '../constants/ble_constants.dart';
 import 'ecdh_service.dart';
 import 'pairing_service.dart';
 import '../models/pairing_device.dart';
+import 'session_crypto.dart';
 
 /// Low-level service for sending commands and receiving responses from ESP32
 /// Handles BLE characteristic read/write operations
@@ -18,6 +19,7 @@ class CommandService {
   
   // Session management
   String? _sessionId;
+  SessionCrypto? _sessionCrypto;
   
   /// Stream of all responses received from ESP32 notification characteristic
   Stream<String> get responseStream => _responseController.stream;
@@ -27,6 +29,9 @@ class CommandService {
   
   /// Get current session ID if authenticated
   String? get sessionId => _sessionId;
+  
+  /// Check if session encryption is active
+  bool get isEncryptionActive => _sessionCrypto != null;
   
   /// Initialize notification listener after connection
   /// Must be called after successful BLE connection
@@ -77,8 +82,27 @@ class CommandService {
         tempSubscription = _ble.subscribeToCharacteristic(characteristic).listen(
           (data) {
             debugPrint('[CommandService] RAW: ${data.length} bytes: $data');
-            final response = String.fromCharCodes(data).trim();
+            String response = String.fromCharCodes(data).trim();
             debugPrint('[CommandService] ← Received: "$response"');
+            
+            // Decrypt response if encrypted
+            if (response.startsWith('ENC:')) {
+              if (_sessionCrypto != null) {
+                try {
+                  final decrypted = _sessionCrypto!.decryptResponse(response);
+                  debugPrint('[CommandService] ✓ Decrypted notification (${decrypted.length} bytes)');
+                  response = decrypted;
+                } catch (e) {
+                  debugPrint('[CommandService] ✗ Decryption failed: $e');
+                  debugPrint('[CommandService] ✗ Keeping encrypted response for error handling');
+                  // Keep the encrypted response for error handling
+                }
+              } else {
+                debugPrint('[CommandService] ⚠ WARNING: Received encrypted response but _sessionCrypto is NULL!');
+                debugPrint('[CommandService] ⚠ This indicates a timing issue - encryption not initialized yet');
+                // Keep encrypted response - will fail later with clear error
+              }
+            }
             
             // Check for SESSION_TIMEOUT notification
             if (response == Esp32Commands.sessionTimeout) {
@@ -87,7 +111,14 @@ class CommandService {
               // The response will be broadcast to listeners who can handle it
             }
             
-            // Broadcast to response stream
+            // Never log actual passwords
+            if (response.startsWith('Password:')) {
+              debugPrint('[CommandService] Password retrieved successfully (hidden from logs)');
+            } else {
+              debugPrint('[CommandService] Decrypted response: $response');
+            }
+            
+            // Broadcast decrypted response to stream
             _responseController.add(response);
             debugPrint('[CommandService] Broadcast to ${_responseController.hasListener ? "ACTIVE" : "NO"} listeners');
           },
@@ -165,8 +196,22 @@ class CommandService {
     if (_connectedDeviceId == null) {
       throw Exception('No device connected');
     }
+    // Commands that should ALWAYS be plaintext (even after ECDH)
+    final alwaysPlaintextCommands = [
+      'ecdh',           // ECDH must be plaintext to establish encryption
+      'status',         // Optional: could encrypt, but not critical
+    ];
+    final commandName = command.split(' ').first.toLowerCase();
+    final shouldEncrypt = _sessionCrypto != null && !alwaysPlaintextCommands.contains(commandName);
+    String commandToSend = command;
+    if (shouldEncrypt) {
+      commandToSend = _sessionCrypto!.encryptCommand(command);
+      debugPrint('[CommandService] Sending encrypted command: ${commandName.toUpperCase()}');
+    } else {
+      debugPrint('[CommandService] Sending plaintext command: $commandName');
+    }
     
-    debugPrint('[CommandService] → Sending: $command');
+    debugPrint('[CommandService] → Sending: $commandToSend');
     
     try {
       final writeCharacteristic = QualifiedCharacteristic(
@@ -192,7 +237,7 @@ class CommandService {
       // ESP32 code: class CommandCallback : public BLECharacteristicCallbacks { void onWrite(...) }
       await _ble.writeCharacteristicWithResponse(
         writeCharacteristic,
-        value: command.codeUnits,
+        value: commandToSend.codeUnits,
       );
       
       debugPrint('[CommandService] Write successful, waiting for response...');
@@ -203,9 +248,9 @@ class CommandService {
       
       // Wait for ESP32 response via notification
       // ESP32 code: sendNotification(response);
+      // Note: Response is already decrypted by notification handler
       final response = await responseFuture;
       
-      debugPrint('[CommandService] Response: $response');
       return response;
       
     } catch (e) {
@@ -335,6 +380,17 @@ class CommandService {
       debugPrint('[ECDH] Computing shared secret...');
       ecdh.computeSharedSecret(Uint8List.fromList(esp32PubKey));
       
+      // CRITICAL: Initialize session encryption BEFORE sending public key
+      // ESP32 will respond with encrypted ECDH_OK/ECDH_OK_PAIRED
+      // We need to be able to decrypt the response
+      if (ecdh.sessionKey != null) {
+        _sessionCrypto = SessionCrypto(ecdh.sessionKey!);
+        debugPrint('[ECDH] Session encryption initialized early (${ecdh.sessionKey!.length} bytes)');
+        debugPrint('[ECDH] Ready to decrypt ESP32 encrypted response');
+      } else {
+        throw Exception('Session key not available after computing shared secret');
+      }
+      
       // Start listening for ECDH response BEFORE sending public key
       debugPrint('[ECDH] Setting up listener for ECDH response...');
       debugPrint('[ECDH] Response stream has listeners: ${_responseController.hasListener}');
@@ -421,6 +477,7 @@ class CommandService {
         debugPrint('[ECDH] \u2713 Received ECDH_OK - reconnection successful!');
         debugPrint('[ECDH] ========================================');
         debugPrint('[ECDH] HANDSHAKE COMPLETE (RECONNECTION)');
+        debugPrint('[ECDH] SESSION ENCRYPTION ACTIVE');
         debugPrint('[ECDH] ========================================');
         return (ecdh: ecdh, isNewPairing: false);
         
@@ -442,6 +499,7 @@ class CommandService {
         debugPrint('[ECDH] Pairing saved to persistent storage');
         debugPrint('[ECDH] ========================================');
         debugPrint('[ECDH] HANDSHAKE COMPLETE (NEW PAIRING)');
+        debugPrint('[ECDH] SESSION ENCRYPTION ACTIVE');
         debugPrint('[ECDH] ========================================');
         return (ecdh: ecdh, isNewPairing: true);
         
@@ -552,18 +610,54 @@ class CommandService {
         debugPrint('[ECDH] Our saved key (first 20 chars): ${ourPublicKeyHex.substring(0, 20)}...');
         
         if (storedKeyHex.toUpperCase() == ourPublicKeyHex) {
-          // Keys match! Pairing is valid - skip ECDH handshake
-          debugPrint('[ECDH] Pairing verified! Keys match - skipping ECDH handshake');
-          debugPrint('[ECDH] Fast reconnection mode activated');
+          // Keys match! But we still need to send our public key to ESP32
+          // so it can also derive the session key for encryption
+          debugPrint('[ECDH] Pairing verified! Keys match - but need to trigger ESP32 session key derivation');
+          debugPrint('[ECDH] Sending our public key to ESP32 to establish session encryption...');
           
           // Create ECDH service and load saved keys
           final ecdh = EcdhService();
           ecdh.loadKeyPair(pairedDevice.clientPrivateKey, pairedDevice.clientPublicKey);
           ecdh.computeSharedSecret(pairedDevice.esp32PublicKey);
           
+          // CRITICAL: Initialize session encryption BEFORE sending public key
+          // ESP32 will respond with encrypted ECDH_OK, so we need to be able to decrypt it
+          if (ecdh.sessionKey != null) {
+            _sessionCrypto = SessionCrypto(ecdh.sessionKey!);
+            debugPrint('[ECDH] Session encryption initialized (${ecdh.sessionKey!.length} bytes)');
+          } else {
+            throw Exception('Session key not available after computing shared secret');
+          }
+          
+          // Now send our public key to ESP32 so it can also derive session key
+          // This triggers ESP32 to call crypto.deriveSessionKey()
+          debugPrint('[ECDH] Writing public key to ECDH characteristic...');
+          await _ble.writeCharacteristicWithResponse(
+            QualifiedCharacteristic(
+              serviceId: Uuid.parse(BleConstants.serviceUuid),
+              characteristicId: Uuid.parse(BleConstants.ecdhCharacteristicUuid),
+              deviceId: deviceId,
+            ),
+            value: pairedDevice.clientPublicKey,
+          );
+          
+          // Wait for ESP32 to process and send encrypted ECDH_OK
+          debugPrint('[ECDH] Waiting for ECDH_OK from ESP32 (will be encrypted)...');
+          final ecdhResponse = await responseStream.first.timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw TimeoutException('No ECDH response from ESP32'),
+          );
+          
+          debugPrint('[ECDH] ESP32 response (decrypted): $ecdhResponse');
+          
+          if (ecdhResponse != Esp32Commands.ecdhOk && ecdhResponse != Esp32Commands.ecdhOkPaired) {
+            throw Exception('Unexpected ECDH response: $ecdhResponse');
+          }
+          
           debugPrint('[ECDH] ========================================');
           debugPrint('[ECDH] OPTIMIZED RECONNECTION COMPLETE');
-          debugPrint('[ECDH] Time saved: ~2 seconds (skipped ECDH handshake)');
+          debugPrint('[ECDH] SESSION ENCRYPTION ACTIVE (both sides)');
+          debugPrint('[ECDH] Time saved: ~1 second (skipped key generation)');
           debugPrint('[ECDH] ========================================');
           
           return (ecdh: ecdh, isNewPairing: false, skippedEcdh: true);
@@ -755,6 +849,19 @@ class CommandService {
       debugPrint('[Session] Error: $e');
       _sessionId = null;
       return false;
+    }
+  }
+  
+  /// After ECDH handshake, initialize session encryption
+  void initializeSessionCrypto(Uint8List sessionKey) {
+    _sessionCrypto = SessionCrypto(sessionKey);
+    debugPrint('[CommandService] Session encryption initialized');
+  }
+  
+  /// After ECDH handshake, call this to set up session encryption
+  Future<void> handleEcdhComplete(EcdhService ecdh) async {
+    if (ecdh.sessionKey != null) {
+      initializeSessionCrypto(ecdh.sessionKey!);
     }
   }
   

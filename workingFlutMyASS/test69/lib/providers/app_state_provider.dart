@@ -11,6 +11,7 @@
 /// }
 /// ```
 
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
@@ -111,12 +112,27 @@ class AppStateNotifier extends StateNotifier<AppState> {
   final CommandService commandService;
   final BleConnectionService bleService;
   final CredentialService credentialService;
+  StreamSubscription<String>? _responseSubscription;
 
   AppStateNotifier({
     required this.commandService,
     required this.bleService,
     required this.credentialService,
-  }) : super(const AppState());
+  }) : super(const AppState()) {
+    // Listen for session timeout notifications from ESP32
+    _responseSubscription = commandService.responseStream.listen((response) {
+      if (response == 'SESSION_TIMEOUT') {
+        debugPrint('[AppStateNotifier] SESSION_TIMEOUT received from ESP32');
+        _handleSessionTimeout();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _responseSubscription?.cancel();
+    super.dispose();
+  }
 
   /// Scan for ESP32 devices
   /// Returns list of discovered device IDs
@@ -253,12 +269,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
         connectedDeviceName: null,
       );
       
-      rethrow;
+        rethrow;
     }
   }
 
   /// Disconnect from ESP32 and reset state
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool isManual = true}) async {
     try {
       final deviceId = state.connectedDeviceId;
       debugPrint('[AppState] Disconnect called for device: $deviceId');
@@ -273,12 +289,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
       
       // Reset state AFTER disconnect completes
       state = const AppState(); // Reset to initial state
-      
       debugPrint('[AppState] Disconnected and state reset');
+      // Only set error message if not manual
+      if (!isManual) {
+        Future.microtask(() {
+          state = state.copyWith(errorMessage: 'Device has been unpaired. Please go to device discovery to repair.');
+        });
+      }
     } catch (e) {
       debugPrint('[AppState] Disconnect error: $e');
-      // Still reset state even if disconnect fails
       state = const AppState();
+      if (!isManual) {
+        Future.microtask(() {
+          state = state.copyWith(errorMessage: 'Device has been unpaired. Please go to device discovery to repair.');
+        });
+      }
     }
   }
   
@@ -287,26 +312,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
   Future<void> unpairDevice() async {
     try {
       debugPrint('[AppState] Unpairing device...');
-      
-      // Disconnect first (if connected)
       if (state.connectedDeviceId != null) {
-        await disconnect();
+        await disconnect(isManual: false);
       }
-      
-      // Send unpair command and remove local data
       await commandService.unpairDevice();
-      
-      state = state.copyWith(
-        clearError: true,
-      );
-      
+      state = state.copyWith(clearError: true);
       debugPrint('[AppState] Device unpaired successfully');
-      
     } catch (e) {
       debugPrint('[AppState] Unpair error: $e');
-      state = state.copyWith(
-        errorMessage: 'Failed to unpair: $e',
-      );
+      state = state.copyWith(errorMessage: 'Failed to unpair: $e');
       rethrow;
     }
   }
@@ -341,7 +355,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
           errorMessage: 'Failed to load credentials: $e',
         );
       }
-      rethrow;
     }
   }
 

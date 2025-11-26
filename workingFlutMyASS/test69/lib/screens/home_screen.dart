@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/app_state_provider.dart';
 import '../models/connection_state.dart' as models;
+import '../models/auth_state.dart';
 import '../services/permission_service.dart';
 import '../services/pairing_service.dart';
 import 'device_scan_screen.dart';
@@ -12,7 +13,10 @@ import 'credential_manager_screen.dart';
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({Key? key}) : super(key: key);
 
+  static bool preventAutoReconnect = false;
+
   Future<void> _autoReconnectIfPaired(WidgetRef ref, BuildContext context) async {
+    if (preventAutoReconnect) return;
     final notifier = ref.read(appStateProvider.notifier);
     final pairingService = PairingService();
     final isPaired = await pairingService.isPaired();
@@ -42,12 +46,14 @@ class HomeScreen extends ConsumerWidget {
     final notifier = ref.read(appStateProvider.notifier);
 
     // Auto-reconnect logic: only runs once when widget builds and not already connected
-    if (!appState.isReady && appState.connectedDeviceId == null) {
-      // Use a post-frame callback to avoid build context issues
+    if (!appState.isReady && appState.connectedDeviceId == null && !preventAutoReconnect) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _autoReconnectIfPaired(ref, context);
       });
     }
+
+    // If session timed out, show reconnect/login UI only
+    final sessionTimedOut = appState.authState == AuthState.unauthenticated || appState.connectionState != models.ConnectionState.authenticated;
 
     return Scaffold(
       appBar: AppBar(
@@ -82,7 +88,7 @@ class HomeScreen extends ConsumerWidget {
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     ],
-                    if (appState.isReady) ...[
+                    if (appState.isReady && !sessionTimedOut) ...[
                       const SizedBox(height: 8),
                       Text(
                         '${appState.credentials.length} credentials stored',
@@ -93,11 +99,9 @@ class HomeScreen extends ConsumerWidget {
                 ),
               ),
             ),
-
             const SizedBox(height: 32),
-
             // Paired device info (when disconnected but paired)
-            if (!appState.isReady && !appState.isLoading)
+            if (!appState.isReady && !appState.isLoading && sessionTimedOut)
               FutureBuilder<bool>(
                 future: _checkIfPaired(),
                 builder: (context, snapshot) {
@@ -184,9 +188,8 @@ class HomeScreen extends ConsumerWidget {
                   return const SizedBox.shrink();
                 },
               ),
-
             // Action buttons
-            if (!appState.isReady) ...[
+            if (!appState.isReady || sessionTimedOut) ...[
               ElevatedButton.icon(
                 onPressed: appState.isLoading
                     ? null
@@ -248,7 +251,6 @@ class HomeScreen extends ConsumerWidget {
                 ],
               ),
             ],
-
             // Error display
             if (appState.errorMessage != null) ...[
               const SizedBox(height: 24),
@@ -427,7 +429,9 @@ class HomeScreen extends ConsumerWidget {
     );
 
     if (confirm == true) {
+      preventAutoReconnect = true;
       await notifier.disconnect();
+      // Optionally reset flag after some navigation or timeout
     }
   }
 

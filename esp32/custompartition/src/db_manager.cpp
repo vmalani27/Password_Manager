@@ -28,20 +28,59 @@ DBManager::~DBManager() {
 bool DBManager::begin(const char* dbPath) {
     Serial.println("DBManager: Initializing SQLite database...");
     
+    // Initialize SQLite with serialized threading mode for multi-threaded access
+    sqlite3_config(SQLITE_CONFIG_SERIALIZED);
     sqlite3_initialize();
-    rc = sqlite3_open(dbPath, &db);
+    
+    // Open database with full mutex protection for thread safety
+    rc = sqlite3_open_v2(dbPath, &db, 
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                         nullptr);
     
     if (rc != SQLITE_OK) {
         Serial.println("DBManager: ERROR - Database open failed: " + String(sqlite3_errmsg(db)));
         return false;
     }
     
-    Serial.println("DBManager: Database opened successfully");
+    Serial.println("DBManager: Database opened successfully (thread-safe mode)");
     
-    // Configure SQLite for better SD card compatibility
-    sqlite3_exec(db, "PRAGMA synchronous = NORMAL;", 0, 0, 0);
-    sqlite3_exec(db, "PRAGMA journal_mode = WAL;", 0, 0, 0);
+    // Configure SQLite for SD card safety (NO WAL MODE - unsafe on SD cards)
+    // WAL mode requires atomic writes which SD cards cannot guarantee
+    // Using DELETE journal mode with FULL synchronous for maximum durability
+    
+    // Use DELETE journal mode (safe for SD cards, removable media)
+    rc = sqlite3_exec(db, "PRAGMA journal_mode = DELETE;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: WARNING - Journal mode failed: " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+    } else {
+        Serial.println("DBManager: DELETE journal mode enabled (SD card safe)");
+    }
+    
+    // FULL synchronous mode - ensures data reaches SD card before commit returns
+    // This is critical for preventing corruption on power loss
+    sqlite3_exec(db, "PRAGMA synchronous = FULL;", 0, 0, 0);
+    Serial.println("DBManager: FULL synchronous mode (maximum safety)");
+    
+    // Use memory for temp tables (faster, no SD writes)
     sqlite3_exec(db, "PRAGMA temp_store = MEMORY;", 0, 0, 0);
+    
+    // Set busy timeout to 5 seconds (wait if database locked)
+    sqlite3_busy_timeout(db, 5000);
+    Serial.println("DBManager: Busy timeout set to 5 seconds");
+    
+    // Run integrity check on startup only (not per-operation)
+    Serial.println("DBManager: Running startup integrity check...");
+    rc = sqlite3_exec(db, "PRAGMA integrity_check;", nullptr, nullptr, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: WARNING - Integrity check failed: " + String(zErrMsg));
+        Serial.println("DBManager: Database may be corrupted - consider using db_reset command");
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+    } else {
+        Serial.println("DBManager: Integrity check passed - database is healthy");
+    }
     
     if (!createTables()) {
         Serial.println("DBManager: ERROR - Failed to create tables");
@@ -368,6 +407,17 @@ void DBManager::auditLog(const String& event, const String& user) {
 
 // Insert encrypted credential (internal)
 bool DBManager::insertCredentialInternal(const String& site, const String& username, const String& password) {
+    Serial.println("DBManager: insertCredentialInternal called");
+    Serial.println("  Site: " + site);
+    Serial.println("  Username: " + username);
+    Serial.println("  Task: " + String((uint32_t)xTaskGetCurrentTaskHandle(), HEX));
+    
+    // Check database connection health
+    if (!db) {
+        Serial.println("DBManager: ERROR - Database connection is NULL");
+        return false;
+    }
+    
     // Encrypt password before storing
     uint8_t ciphertext[MAX_PASSWORD_ENCRYPTED_SIZE];
     uint8_t iv[IV_SIZE];
@@ -378,26 +428,61 @@ bool DBManager::insertCredentialInternal(const String& site, const String& usern
         return false;
     }
     
-    const char* sql = "INSERT INTO credentials (site, username, encrypted_password, iv) VALUES (?, ?, ?, ?);";
-    sqlite3_stmt* stmt = nullptr;
+    Serial.println("DBManager: Password encrypted successfully");
     
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        Serial.println("DBManager: Prepare failed (insert): " + String(sqlite3_errmsg(db)));
+    // Begin transaction for atomic write (critical for SD card safety)
+    Serial.println("DBManager: Beginning transaction...");
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: BEGIN IMMEDIATE failed: " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
         return false;
     }
     
+    const char* sql = "INSERT INTO credentials (site, username, encrypted_password, iv) VALUES (?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    
+    Serial.println("DBManager: Preparing SQL statement...");
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: Prepare failed (insert): " + String(sqlite3_errmsg(db)) + " (code: " + String(rc) + ")");
+        return false;
+    }
+    
+    Serial.println("DBManager: Binding parameters...");
     sqlite3_bind_text(stmt, 1, site.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_blob(stmt, 3, ciphertext, ciphertext_len, SQLITE_TRANSIENT);
     sqlite3_bind_blob(stmt, 4, iv, IV_SIZE, SQLITE_TRANSIENT);
     
-    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
-    if (!ok) {
-        Serial.println("DBManager: Insert step failed: " + String(sqlite3_errmsg(db)));
-    }
+    Serial.println("DBManager: Executing INSERT...");
+    rc = sqlite3_step(stmt);
+    bool ok = (rc == SQLITE_DONE);
     
     sqlite3_finalize(stmt);
-    return ok;
+    
+    if (!ok) {
+        Serial.println("DBManager: Insert step failed: " + String(sqlite3_errmsg(db)) + " (code: " + String(rc) + ")");
+        // Rollback transaction on failure
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        Serial.println("DBManager: Transaction rolled back");
+        return false;
+    }
+    
+    // Commit transaction (ensures atomic write to SD card)
+    Serial.println("DBManager: Committing transaction...");
+    rc = sqlite3_exec(db, "COMMIT;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: COMMIT failed: " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        return false;
+    }
+    
+    Serial.println("DBManager: Insert successful (committed to SD card)");
+    return true;
 }
 
 // Update encrypted credential (internal)
@@ -411,11 +496,21 @@ bool DBManager::updateCredentialInternal(const String& site, const String& usern
         return false;
     }
     
+    // Begin transaction
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: BEGIN failed (update): " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+        return false;
+    }
+    
     const char* sql = "UPDATE credentials SET encrypted_password=?, iv=? WHERE site=? AND username=?;";
     sqlite3_stmt* stmt = nullptr;
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         Serial.println("DBManager: Prepare failed (update): " + String(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
         return false;
     }
     
@@ -424,35 +519,71 @@ bool DBManager::updateCredentialInternal(const String& site, const String& usern
     sqlite3_bind_text(stmt, 3, site.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, username.c_str(), -1, SQLITE_TRANSIENT);
     
-    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
-    if (!ok) {
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
         Serial.println("DBManager: Update step failed: " + String(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        return false;
     }
     
-    sqlite3_finalize(stmt);
-    return ok;
+    // Commit transaction
+    rc = sqlite3_exec(db, "COMMIT;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: COMMIT failed (update): " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        return false;
+    }
+    
+    return true;
 }
 
 // Delete credential (internal)
 bool DBManager::deleteCredentialInternal(const String& site, const String& username) {
+    // Begin transaction
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: BEGIN failed (delete): " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+        return false;
+    }
+    
     const char* sql = "DELETE FROM credentials WHERE site=? AND username=?;";
     sqlite3_stmt* stmt = nullptr;
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         Serial.println("DBManager: Prepare failed (delete): " + String(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
         return false;
     }
     
     sqlite3_bind_text(stmt, 1, site.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
     
-    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
-    if (!ok) {
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
         Serial.println("DBManager: Delete step failed: " + String(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        return false;
     }
     
-    sqlite3_finalize(stmt);
-    return ok;
+    // Commit transaction
+    rc = sqlite3_exec(db, "COMMIT;", 0, 0, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: COMMIT failed (delete): " + String(zErrMsg));
+        sqlite3_free(zErrMsg);
+        zErrMsg = nullptr;
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        return false;
+    }
+    
+    return true;
 }
 
 // Get and decrypt password (internal)
@@ -473,12 +604,33 @@ String DBManager::getPasswordInternal(const String& site, const String& username
         const void* encrypted_data = sqlite3_column_blob(stmt, 0);
         int encrypted_len = sqlite3_column_bytes(stmt, 0);
         const void* iv_data = sqlite3_column_blob(stmt, 1);
+        int iv_len = sqlite3_column_bytes(stmt, 1);
         
-        if (encrypted_data && iv_data) {
-            String decrypted;
-            if (decrypt_password((const uint8_t*)encrypted_data, encrypted_len, (const uint8_t*)iv_data, decrypted)) {
-                out = decrypted;
-            }
+        // Validate data before attempting decryption
+        if (!encrypted_data || encrypted_len == 0) {
+            Serial.printf("DBManager: Empty encrypted data for %s/%s\n", site.c_str(), username.c_str());
+            sqlite3_finalize(stmt);
+            return out;
+        }
+        
+        if (!iv_data || iv_len != 16) {
+            Serial.printf("DBManager: Invalid IV data for %s/%s (length: %d)\n", site.c_str(), username.c_str(), iv_len);
+            sqlite3_finalize(stmt);
+            return out;
+        }
+        
+        if (encrypted_len % 16 != 0) {
+            Serial.printf("DBManager: Invalid encrypted data length for %s/%s (%d bytes, not multiple of 16)\n", 
+                         site.c_str(), username.c_str(), encrypted_len);
+            sqlite3_finalize(stmt);
+            return out;
+        }
+        
+        String decrypted;
+        if (decrypt_password((const uint8_t*)encrypted_data, encrypted_len, (const uint8_t*)iv_data, decrypted)) {
+            out = decrypted;
+        } else {
+            Serial.printf("DBManager: Decryption failed for %s/%s - data may be corrupted\n", site.c_str(), username.c_str());
         }
     }
     
@@ -509,11 +661,19 @@ String DBManager::listCredentialsInternal() {
 
 // Log audit event (internal)
 void DBManager::auditLogInternal(const String& event, const String& user) {
+    // Begin transaction (audit logs also need atomicity)
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE;", 0, 0, 0);
+    if (rc != SQLITE_OK) {
+        Serial.println("DBManager: BEGIN failed (audit): " + String(sqlite3_errmsg(db)));
+        return;
+    }
+    
     const char* sql = "INSERT INTO audit_log (timestamp, event, user) VALUES (?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         Serial.println("DBManager: Audit prepare failed: " + String(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
         return;
     }
     
@@ -521,6 +681,15 @@ void DBManager::auditLogInternal(const String& event, const String& user) {
     sqlite3_bind_text(stmt, 2, event.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_TRANSIENT);
     
-    sqlite3_step(stmt);
+    rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        Serial.println("DBManager: Audit log failed: " + String(sqlite3_errmsg(db)));
+        sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
+        return;
+    }
+    
+    // Commit transaction
+    sqlite3_exec(db, "COMMIT;", 0, 0, 0);
 }
