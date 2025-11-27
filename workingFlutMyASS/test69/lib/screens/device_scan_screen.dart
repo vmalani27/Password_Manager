@@ -11,25 +11,94 @@ class DeviceScanScreen extends ConsumerStatefulWidget {
 }
 
 class _DeviceScanScreenState extends ConsumerState<DeviceScanScreen> {
+  bool _showSetupScreen = true;
+  bool _autoRetrying = false;
+  bool _bluetoothReady = false;
+  bool _foundDevice = false;
+
   @override
   void initState() {
     super.initState();
     // Start scan when screen is first loaded
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final scanNotifier = ref.read(deviceScanProvider.notifier);
-      final scanState = ref.read(deviceScanProvider);
-      
-      // Only start scan if not already scanning and no devices found
-      if (!scanState.isScanning && scanState.devices.isEmpty) {
-        scanNotifier.startScan();
-      }
+      _startScanWithSetup();
     });
+  }
+
+  Future<void> _startScanWithSetup() async {
+    debugPrint('[DeviceScanScreen] _startScanWithSetup called');
+    setState(() {
+      _showSetupScreen = true;
+      _autoRetrying = false;
+      _bluetoothReady = false;
+      _foundDevice = false;
+    });
+    debugPrint('[DeviceScanScreen] State after reset: showSetup=$_showSetupScreen, autoRetry=$_autoRetrying, btReady=$_bluetoothReady, foundDevice=$_foundDevice');
+    final scanNotifier = ref.read(deviceScanProvider.notifier);
+    await scanNotifier.startScan(
+      onBluetoothReady: () {
+        debugPrint('[DeviceScanScreen] onBluetoothReady called');
+        setState(() {
+          _bluetoothReady = true;
+        });
+        debugPrint('[DeviceScanScreen] State after btReady: showSetup=$_showSetupScreen, btReady=$_bluetoothReady');
+      },
+      onDeviceFound: () async {
+        debugPrint('[DeviceScanScreen] onDeviceFound called');
+        setState(() {
+          _foundDevice = true;
+          _showSetupScreen = false;
+        });
+        debugPrint('[DeviceScanScreen] State after deviceFound: showSetup=$_showSetupScreen, foundDevice=$_foundDevice');
+        // Show 'Device found!' message for 1 second before proceeding
+        await Future.delayed(const Duration(seconds: 1));
+      },
+    );
+    debugPrint('[DeviceScanScreen] Scan completed, foundDevice=$_foundDevice');
+    if (!_foundDevice) {
+      setState(() {
+        _showSetupScreen = false;
+      });
+      debugPrint('[DeviceScanScreen] State after scan complete: showSetup=$_showSetupScreen');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final scanState = ref.watch(deviceScanProvider);
     final scanNotifier = ref.read(deviceScanProvider.notifier);
+
+    debugPrint('[DeviceScanScreen] build called: showSetup=$_showSetupScreen, btReady=$_bluetoothReady, foundDevice=$_foundDevice');
+    if (_showSetupScreen) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Connect to ESP32')),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (_foundDevice)
+                Column(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.green, size: 48),
+                    const SizedBox(height: 16),
+                    const Text('Device found!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.green)),
+                  ],
+                )
+              else ...[
+                const CircularProgressIndicator(),
+                const SizedBox(height: 24),
+                if (!_bluetoothReady)
+                  Text(_autoRetrying
+                      ? 'Bluetooth is initializing... Retrying scan.'
+                      : 'Setting up services...'),
+                if (_bluetoothReady && !_foundDevice)
+                  const Text('Searching for nearby devices...'),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
       appBar: AppBar(

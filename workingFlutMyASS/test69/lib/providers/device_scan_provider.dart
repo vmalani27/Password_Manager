@@ -40,11 +40,14 @@ final deviceScanProvider = StateNotifierProvider<DeviceScanNotifier, DeviceScanS
 
 class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
   final Ref _ref;
+  bool _bluetoothReady = false;
 
   DeviceScanNotifier(this._ref) : super(const DeviceScanState());
 
+  bool get bluetoothReady => _bluetoothReady;
+
   /// Start scanning for ESP32 devices
-  Future<void> startScan({Duration timeout = const Duration(seconds: 10)}) async {
+  Future<void> startScan({Duration timeout = const Duration(seconds: 10), void Function()? onBluetoothReady, void Function()? onDeviceFound}) async {
     state = state.copyWith(
       isScanning: true,
       clearError: true,
@@ -53,15 +56,32 @@ class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
 
     try {
       final appNotifier = _ref.read(appStateProvider.notifier);
+      final bleService = _ref.read(bleConnectionServiceProvider);
       final devices = await appNotifier.scanForDevices(timeout: timeout);
-      
-      state = state.copyWith(
-        devices: devices,
-        isScanning: false,
-      );
+      bool foundEsp32 = false;
+      for (final device in devices) {
+        if (!_bluetoothReady) {
+          _bluetoothReady = true;
+          if (onBluetoothReady != null) onBluetoothReady();
+        }
+        // Add device to state
+        state = state.copyWith(devices: [...state.devices, device]);
+        // If first ESP32 device found, stop scan and exit loop
+        if (device.name.contains('ESP32')) {
+          foundEsp32 = true;
+          bleService.stopScan();
+          state = state.copyWith(isScanning: false);
+          if (onDeviceFound != null) onDeviceFound();
+          // Exit loop and prevent further state updates
+          break;
+        }
+      }
+      // Only update state if no ESP32 was found
+      if (!foundEsp32) {
+        state = state.copyWith(isScanning: false);
+      }
     } catch (e) {
       debugPrint('[DeviceScan] Scan failed: $e');
-      
       state = state.copyWith(
         isScanning: false,
         errorMessage: _formatErrorMessage(e),

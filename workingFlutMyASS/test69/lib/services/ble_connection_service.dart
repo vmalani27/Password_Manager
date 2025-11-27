@@ -76,6 +76,8 @@ class BleConnectionService {
             debugPrint('[BleConnection] Found device: ${device.name} (${device.id}) ${isMatching ? "PAIRED" : ""}');
             _discoveredDevices.add(device);
             _discoveredDevicesController.add(List.from(_discoveredDevices));
+            // Stop scan immediately when first ESP32 device is found
+            stopScan();
           }
         }
       },

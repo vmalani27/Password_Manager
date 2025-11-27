@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'screens/auth_gate.dart';
 import 'screens/home_screen.dart';
 
 void main() {
@@ -22,7 +23,7 @@ class PasswordManagerApp extends StatelessWidget {
         primarySwatch: Colors.blue,
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: const AuthGate(child: HomeScreen(), reason: 'Authenticate to access Password Manager'),
     );
   }
 }
