@@ -87,19 +87,21 @@ class CommandService {
             
             // Decrypt response if encrypted
             if (response.startsWith('ENC:')) {
+              debugPrint('[CommandService] Encrypted notification detected');
               if (_sessionCrypto != null) {
                 try {
                   final decrypted = _sessionCrypto!.decryptResponse(response);
-                  debugPrint('[CommandService] ✓ Decrypted notification (${decrypted.length} bytes)');
+                  debugPrint('[CommandService] ✓ Decrypted: "$decrypted" (${decrypted.length} bytes)');
                   response = decrypted;
                 } catch (e) {
                   debugPrint('[CommandService] ✗ Decryption failed: $e');
-                  debugPrint('[CommandService] ✗ Keeping encrypted response for error handling');
+                  debugPrint('[CommandService] ✗ Keeping encrypted response: $response');
                   // Keep the encrypted response for error handling
                 }
               } else {
                 debugPrint('[CommandService] ⚠ WARNING: Received encrypted response but _sessionCrypto is NULL!');
-                debugPrint('[CommandService] ⚠ This indicates a timing issue - encryption not initialized yet');
+                debugPrint('[CommandService] ⚠ Response: $response');
+                debugPrint('[CommandService] ⚠ This indicates encryption not initialized yet');
                 // Keep encrypted response - will fail later with clear error
               }
             }
@@ -385,9 +387,11 @@ class CommandService {
       // We need to be able to decrypt the response
       if (ecdh.sessionKey != null) {
         _sessionCrypto = SessionCrypto(ecdh.sessionKey!);
-        debugPrint('[ECDH] Session encryption initialized early (${ecdh.sessionKey!.length} bytes)');
-        debugPrint('[ECDH] Ready to decrypt ESP32 encrypted response');
+        debugPrint('[ECDH] ✓ Session encryption initialized with new session key (${ecdh.sessionKey!.length} bytes)');
+        debugPrint('[ECDH] ✓ Encryption active: ${_sessionCrypto != null}');
+        debugPrint('[ECDH] ✓ Ready to decrypt ESP32 encrypted response');
       } else {
+        debugPrint('[ECDH] ✗ CRITICAL: Session key is NULL after computing shared secret!');
         throw Exception('Session key not available after computing shared secret');
       }
       
@@ -403,6 +407,7 @@ class CommandService {
       
       subscription = responseStream.listen((response) {
         debugPrint('[ECDH] Received notification: $response');
+        debugPrint('[ECDH] Encryption status at receive: ${_sessionCrypto != null ? "ACTIVE" : "NULL"}');
         if (!completer.isCompleted) {
           completer.complete(response);
           subscription.cancel();

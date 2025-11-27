@@ -148,7 +148,7 @@ class CredentialService {
   
   /// List all credentials (returns service/identifier pairs only, no passwords)
   /// ESP32 code: if (cmd.equalsIgnoreCase("list")) { String out = listCredentials(); sendNotification("LIST:\n" + out); }
-  /// ESP32 format: "LIST:\ngithub.com user@email.com\ngoogle.com admin"
+  /// ESP32 actual format: "LIST:\njdjdir nfkfjd\ninstagram vmalanixx" (space-separated: site username)
   Future<List<Credential>> listCredentials(String deviceId) async {
     debugPrint('[Credential] Listing all credentials...');
     
@@ -158,8 +158,7 @@ class CredentialService {
         timeout: BleConstants.commandTimeout,
       );
       
-      // ESP32 sends: "LIST:\n(none)" or "LIST:\ncredential data"
-      // Check for both literal "\n" and actual newline
+      debugPrint('[Credential] Raw LIST response: $response');
       
       // Check for NOT AUTHORIZED (session expired)
       if (response == 'NOT AUTHORIZED') {
@@ -170,17 +169,21 @@ class CredentialService {
         throw Exception('Unexpected list response: $response');
       }
       
-      // Extract content after "LIST:" and first newline/separator
-      String content;
-      if (response.contains('\n')) {
-        // Actual newline
-        content = response.substring(response.indexOf('\n') + 1).trim();
-      } else if (response.contains('\\n')) {
-        // Literal \n
-        content = response.substring(response.indexOf('\\n') + 2).trim();
-      } else {
-        content = response.substring(5).trim(); // Just remove "LIST:"
+      // Extract content after "LIST:"
+      // Response format: "LIST:\njdjdir nfkfjd" or "LIST:\n(none)"
+      String content = response.substring(5); // Remove "LIST:"
+      
+      // Remove leading newline if present
+      if (content.startsWith('\n')) {
+        content = content.substring(1);
+      } else if (content.startsWith('\\n')) {
+        content = content.substring(2);
       }
+      
+      // Now trim whitespace
+      content = content.trim();
+      
+      debugPrint('[Credential] Extracted content: "$content"');
       
       // Handle empty list - ESP32 sends "(none)" when no credentials exist
       if (content.isEmpty || content == '(none)') {
@@ -188,7 +191,7 @@ class CredentialService {
         return [];
       }
       
-      // Parse each line: "Service: example.com | Identifier: john@example.com"
+      // Parse each line - Credential model handles ESP32's "Site: ... | User: ..." format
       final lines = content.split('\n');
       final credentials = <Credential>[];
       
@@ -198,6 +201,7 @@ class CredentialService {
         try {
           final credential = Credential.fromEsp32Response(line);
           credentials.add(credential);
+          debugPrint('[Credential] Parsed: ${credential.service} / ${credential.username}');
         } catch (e) {
           debugPrint('[Credential] Warning: Failed to parse line: $line - $e');
         }
@@ -225,7 +229,7 @@ class CredentialService {
     }
     return Credential(
       service: service,
-      identifier: identifier,
+      username: identifier,
       password: password,
     );
   }

@@ -465,9 +465,14 @@ class HomeScreen extends ConsumerWidget {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Device unpaired successfully'),
+              content: Text('Device unpaired successfully. Returning to device discovery...'),
               backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
             ),
+          );
+          // Navigate back to device discovery screen after unpair
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (context) => const DeviceScanScreen()),
           );
         }
       } catch (e) {

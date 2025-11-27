@@ -258,7 +258,7 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
     try {
       final password = await notifier.getPassword(
         service: credential.service,
-        identifier: credential.identifier,
+        identifier: credential.username,
       );
 
       if (context.mounted) {
@@ -473,7 +473,7 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
       try {
         await notifier.updateCredential(
           service: credential.service,
-          identifier: credential.identifier,
+          identifier: credential.username,
           newPassword: passwordController.text,
         );
         
@@ -544,7 +544,7 @@ class _CredentialManagerScreenState extends ConsumerState<CredentialManagerScree
       try {
         await notifier.deleteCredential(
           service: credential.service,
-          identifier: credential.identifier,
+          identifier: credential.username,
         );
         
         if (context.mounted) {

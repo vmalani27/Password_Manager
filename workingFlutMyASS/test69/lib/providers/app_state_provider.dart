@@ -21,6 +21,7 @@ import '../models/credential.dart';
 import '../services/ble_connection_service.dart';
 import '../services/credential_service.dart';
 import '../services/command_service.dart';
+import '../services/pairing_service.dart';
 
 /// Application state that combines all service states
 class AppState {
@@ -308,14 +309,32 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
   
   /// Unpair from the current device
-  /// This will disconnect, send unpair command to ESP32, and remove local pairing data
+  /// This will disconnect, remove local pairing data
+  /// Note: ESP32 unpair command is sent only if connected
   Future<void> unpairDevice() async {
     try {
       debugPrint('[AppState] Unpairing device...');
+      
+      // Try to send unpair command to ESP32 if connected
       if (state.connectedDeviceId != null) {
+        try {
+          debugPrint('[AppState] Sending unpair command to ESP32...');
+          await commandService.unpairDevice();
+          debugPrint('[AppState] ESP32 unpair command sent');
+        } catch (e) {
+          debugPrint('[AppState] Failed to send unpair command (device may be disconnected): $e');
+          // Continue anyway - we'll clean up locally
+        }
+        
+        // Disconnect from device
         await disconnect(isManual: false);
+      } else {
+        debugPrint('[AppState] No connected device - just removing local pairing data');
+        // Not connected, just remove local pairing data
+        final pairingService = PairingService();
+        await pairingService.removePairing();
       }
-      await commandService.unpairDevice();
+      
       state = state.copyWith(clearError: true);
       debugPrint('[AppState] Device unpaired successfully');
     } catch (e) {

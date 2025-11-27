@@ -13,88 +13,96 @@
 static uint8_t runtime_key[32];
 static bool key_ready = false;
 
-// Derive runtime key from eFuse BLOCK3 + challenge using HMAC-SHA256
-bool derive_key_from_efuse_and_challenge(const uint8_t* challenge, size_t challenge_len, uint8_t* output_key) {
+// Derive deterministic DB key from eFuse BLOCK3 using HMAC-SHA256
+// This ensures the SAME key is derived on every boot (required for database decryption)
+// Security: eFuse BLOCK3 is hardware root-of-trust, label "DB_KEY_V1" is deterministic
+static bool derive_db_key_from_efuse(uint8_t* out, size_t out_len) {
+    if (out_len < 32) {
+        Serial.println("ERROR: Output buffer too small for DB key");
+        return false;
+    }
+
     // Read eFuse BLOCK3 (256 bits = 32 bytes)
-    uint8_t efuse_key[32];
-    size_t efuse_len = sizeof(efuse_key);
-    // Read eFuse BLOCK3 (raw 256-bit user key)
-esp_err_t ret = esp_efuse_read_block(EFUSE_BLK3, efuse_key, 0, 256);
-
-if (ret != ESP_OK) {
-    Serial.printf("eFuse BLOCK3 read failed: %s\n", esp_err_to_name(ret));
-    return false;
-}
-
-
-    Serial.println("eFuse BLOCK3 read successfully");
+    uint8_t efuse_key[32] = {0};
+    esp_err_t ret = esp_efuse_read_block(EFUSE_BLK3, efuse_key, 0, 256);
     
-    // HMAC-SHA256: HMAC(eFuse_key, challenge) -> runtime_key
+    if (ret != ESP_OK) {
+        Serial.printf("eFuse BLOCK3 read failed: %s\n", esp_err_to_name(ret));
+        return false;
+    }
+    
+    Serial.println("eFuse BLOCK3 read successfully");
+
+    // Deterministic label for DB key derivation
+    // Same eFuse + same label = same key every boot
+    const uint8_t label[] = "DB_KEY_V1";
+
     mbedtls_md_context_t ctx;
     mbedtls_md_init(&ctx);
-    
-    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+
+    const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (mbedtls_md_setup(&ctx, info, 1) != 0) {
-        Serial.println("HMAC setup failed");
+        Serial.println("ERROR: HMAC setup failed");
         mbedtls_md_free(&ctx);
+        memset(efuse_key, 0, sizeof(efuse_key));
         return false;
     }
-    
+
+    // HMAC-SHA256(efuse_key, "DB_KEY_V1") -> 32-byte deterministic key
     if (mbedtls_md_hmac_starts(&ctx, efuse_key, sizeof(efuse_key)) != 0) {
-        Serial.println("HMAC start failed");
+        Serial.println("ERROR: HMAC start failed");
         mbedtls_md_free(&ctx);
+        memset(efuse_key, 0, sizeof(efuse_key));
         return false;
     }
     
-    if (mbedtls_md_hmac_update(&ctx, challenge, challenge_len) != 0) {
-        Serial.println("HMAC update failed");
+    if (mbedtls_md_hmac_update(&ctx, label, sizeof(label) - 1) != 0) {
+        Serial.println("ERROR: HMAC update failed");
         mbedtls_md_free(&ctx);
+        memset(efuse_key, 0, sizeof(efuse_key));
         return false;
     }
     
-    if (mbedtls_md_hmac_finish(&ctx, output_key) != 0) {
-        Serial.println("HMAC finish failed");
+    if (mbedtls_md_hmac_finish(&ctx, out) != 0) {
+        Serial.println("ERROR: HMAC finish failed");
         mbedtls_md_free(&ctx);
+        memset(efuse_key, 0, sizeof(efuse_key));
         return false;
     }
-    
+
     mbedtls_md_free(&ctx);
     
     // Zero out the eFuse key from memory for security
     memset(efuse_key, 0, sizeof(efuse_key));
-    
-    Serial.println("Runtime key derived successfully");
+
+    Serial.println("DB runtime key derived from eFuse (deterministic)");
     return true;
 }
 
-// Synchronous runtime key derivation
+// Synchronous runtime key derivation (deterministic)
+// Derives the same key on every boot for database encryption
 bool deriveRuntimeKey() {
-    Serial.println("Deriving runtime key...");
+    Serial.println("Deriving deterministic runtime key from eFuse...");
     
-    // Generate a random challenge for this boot session
-    uint8_t challenge[16];
-    for (int i = 0; i < sizeof(challenge); i++) {
-        challenge[i] = esp_random() & 0xFF;
-    }
-    
-    Serial.println("Generated random challenge");
-    
-    // Derive the runtime key
-    if (derive_key_from_efuse_and_challenge(challenge, sizeof(challenge), runtime_key)) {
+    // Derive deterministic DB key from eFuse BLOCK3
+    // Same hardware -> same key every boot
+    if (derive_db_key_from_efuse(runtime_key, sizeof(runtime_key))) {
         key_ready = true;
-        Serial.println("Runtime key derived and ready");
+        Serial.println("Runtime key derived and ready (stable across reboots)");
         return true;
     } else {
-        Serial.println("Failed to derive runtime key");
+        Serial.println("ERROR: Failed to derive runtime key");
         return false;
     }
 }
 
-// Initialize key manager (minimal setup)
+// Initialize key manager
+// Note: deriveRuntimeKey() is called separately in main.cpp setup()
 bool initKeyManager() {
     Serial.println("Initializing key manager...");
     // mbedTLS is already initialized by ESP-IDF
     key_ready = false;
+    Serial.println("Key manager initialized (ready for key derivation)");
     return true;
 }
 
