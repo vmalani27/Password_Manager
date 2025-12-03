@@ -661,35 +661,50 @@ String DBManager::listCredentialsInternal() {
 
 // Log audit event (internal)
 void DBManager::auditLogInternal(const String& event, const String& user) {
+    Serial.println("DBManager: auditLogInternal called");
+    Serial.println("  Event: " + event);
+    Serial.println("  User: " + user);
+    Serial.print("  DB pointer: "); Serial.println((uint32_t)db, HEX);
+
     // Begin transaction (audit logs also need atomicity)
     rc = sqlite3_exec(db, "BEGIN IMMEDIATE;", 0, 0, 0);
+    Serial.print("  BEGIN IMMEDIATE rc: "); Serial.println(rc);
+    Serial.print("  BEGIN IMMEDIATE errmsg: "); Serial.println(String(sqlite3_errmsg(db)));
     if (rc != SQLITE_OK) {
         Serial.println("DBManager: BEGIN failed (audit): " + String(sqlite3_errmsg(db)));
         return;
     }
-    
+
     const char* sql = "INSERT INTO audit_log (timestamp, event, user) VALUES (?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
-    
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    Serial.print("  prepare rc: "); Serial.println(rc);
+    Serial.print("  prepare errmsg: "); Serial.println(String(sqlite3_errmsg(db)));
+    if (rc != SQLITE_OK) {
         Serial.println("DBManager: Audit prepare failed: " + String(sqlite3_errmsg(db)));
         sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
         return;
     }
-    
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)time(NULL));
-    sqlite3_bind_text(stmt, 2, event.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_TRANSIENT);
-    
+
+    rc = sqlite3_bind_int64(stmt, 1, (sqlite3_int64)time(NULL));
+    Serial.print("  bind_int64 rc: "); Serial.println(rc);
+    rc = sqlite3_bind_text(stmt, 2, event.c_str(), -1, SQLITE_TRANSIENT);
+    Serial.print("  bind_text event rc: "); Serial.println(rc);
+    rc = sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_TRANSIENT);
+    Serial.print("  bind_text user rc: "); Serial.println(rc);
+
     rc = sqlite3_step(stmt);
+    Serial.print("  step rc: "); Serial.println(rc);
+    Serial.print("  step errmsg: "); Serial.println(String(sqlite3_errmsg(db)));
     sqlite3_finalize(stmt);
-    
+
     if (rc != SQLITE_DONE) {
         Serial.println("DBManager: Audit log failed: " + String(sqlite3_errmsg(db)));
         sqlite3_exec(db, "ROLLBACK;", 0, 0, 0);
         return;
     }
-    
-    // Commit transaction
-    sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+
+    rc = sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+    Serial.print("  COMMIT rc: "); Serial.println(rc);
+    Serial.print("  COMMIT errmsg: "); Serial.println(String(sqlite3_errmsg(db)));
 }

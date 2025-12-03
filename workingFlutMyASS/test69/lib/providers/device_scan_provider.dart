@@ -51,17 +51,27 @@ class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
       devices: [],
     );
 
+    final scanStart = DateTime.now();
+    debugPrint('[DeviceScan] Scan started at: ${scanStart.toIso8601String()}');
+
     try {
       final appNotifier = _ref.read(appStateProvider.notifier);
       final devices = await appNotifier.scanForDevices(timeout: timeout);
-      
+
+      if (devices.isNotEmpty) {
+        final firstDevice = devices.first;
+        final foundTime = DateTime.now();
+        debugPrint('[DeviceScan] Device discovered: ${firstDevice.name} (${firstDevice.id}) at ${foundTime.toIso8601String()}');
+        debugPrint('[DeviceScan] Time from scan start to device discovery: ${foundTime.difference(scanStart).inMilliseconds} ms');
+      }
+
       state = state.copyWith(
         devices: devices,
         isScanning: false,
       );
     } catch (e) {
       debugPrint('[DeviceScan] Scan failed: $e');
-      
+
       state = state.copyWith(
         isScanning: false,
         errorMessage: _formatErrorMessage(e),
@@ -71,6 +81,9 @@ class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
 
   /// Connect to a device
   Future<bool> connectToDevice(DiscoveredDevice device) async {
+    final pairingStart = DateTime.now();
+    debugPrint('[DeviceScan] Pairing process initiated for device: ${device.name} (${device.id}) at ${pairingStart.toIso8601String()}');
+
     state = state.copyWith(
       isConnecting: true,
       clearError: true,
@@ -78,16 +91,20 @@ class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
 
     try {
       final appNotifier = _ref.read(appStateProvider.notifier);
-      
+
       final isNewPairing = await appNotifier.connectAndAuthenticate(
         deviceId: device.id,
         deviceName: device.name,
         pin: '123456',
       );
 
+      final pairingEnd = DateTime.now();
+      debugPrint('[DeviceScan] Pairing process completed at: ${pairingEnd.toIso8601String()}');
+      debugPrint('[DeviceScan] Time from pairing start to completion: ${pairingEnd.difference(pairingStart).inMilliseconds} ms');
+
       state = state.copyWith(isConnecting: false);
       return isNewPairing;
-      
+
     } catch (e) {
       state = state.copyWith(
         isConnecting: false,
