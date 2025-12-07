@@ -62,7 +62,7 @@ public:
     void checkUnpairButton();
     
     // Notification
-    void sendNotification(const String& data);
+        void sendNotification(const String& data, bool forcePlaintext = false);
     
     // Session management
     String generateSessionToken();

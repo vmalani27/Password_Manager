@@ -4,9 +4,10 @@ Hardware-based password vault with cryptographic authentication using ESP32, BLE
 
 ## Project Overview
 
-**Status:** Sprint 3 In Progress - Database Worker Queue  
+
+**Status:** Sprint 3 In Progress — Most core features implemented on ESP32, security upgrades and Flutter client integration in progress  
 **Version:** 0.4.0-alpha  
-**Last Updated:** November 25, 2025
+**Last Updated:** December 7, 2025
 
 ### What This Project Does
 
@@ -14,34 +15,35 @@ Secure credential storage on ESP32 hardware, accessed wirelessly via Flutter mob
 
 ### Key Features
 
-**Implemented (Sprint 3 - Nov 25, 2025):**
-- **Modular Architecture** - Refactored from 1241 lines monolithic to 5 manager modules
-- **AES-256-CBC Encryption** - eFuse-derived hardware keys for database encryption
-- **ECDH Key Exchange** - secp256r1 (P-256) curve with device binding
-- **Two-Layer Authentication** - ECDH device pairing + token-based session authorization
-- **Device Binding** - NVS persistent pairing, one phone ↔ one ESP32
-- **SQLite Encrypted Storage** - Credentials encrypted at rest on SD card
-- **BLE Security Protocol** - SMP pairing + ECDH characteristic + command/response model
-- **Session Management** - Fast unlock flow with check_pairing optimization (~500ms)
-- **Timeout Management** - 3-min session timeout, 5-min connection timeout with auto-clear
-- **OS-Level Unpair Detection** - Auto-recovery when user forgets device in Bluetooth settings
-- **Physical Unpair Button** - Hold BOOT button (GPIO0) for 3 seconds to unpair
-- **Optimized Reconnection** - Skip ECDH if pairing verified (4-6x faster)
-- **Partition Viewer** - Boot-time flash partition and memory diagnostics
-- **Database Worker Queue** - FreeRTOS task prevents SQLite corruption from concurrent BLE callbacks
-- **Quote-Aware Parser** - Support for multi-word service names: `add "Google Mail" user pass`
-- **Emergency Recovery** - `db_reset` command for corrupted database recovery
-- **Secure Token Generation** - Uses `esp_random()` hardware RNG (32-bit tokens, upgrading to 128-bit)
+**Implemented (as of Dec 2025):**
+- **Modular Architecture** — 5 manager modules (BLE, Crypto, DB, UI, Command)
+- **AES-256-CBC Encryption** — eFuse-derived hardware keys for database encryption
+- **ECDH Key Exchange** — secp256r1 (P-256) curve with device binding
+- **Two-Layer Authentication** — ECDH device pairing + token-based session authorization (32-bit, 128-bit upgrade in progress)
+- **Device Binding** — NVS persistent pairing, one phone ↔ one ESP32
+- **SQLite Encrypted Storage** — Credentials encrypted at rest on SD card
+- **BLE Security Protocol** — SMP pairing + ECDH characteristic + command/response model
+- **Session Management** — Fast unlock flow with check_pairing optimization (~500ms)
+- **Timeout Management** — 3-min session timeout, 5-min connection timeout with auto-clear
+- **OS-Level Unpair Detection** — Auto-recovery when user forgets device in Bluetooth settings
+- **Physical Unpair Button** — Hold BOOT button (GPIO0) for 3 seconds to unpair
+- **Optimized Reconnection** — Skip ECDH if pairing verified (4-6x faster)
+- **Partition Viewer** — Boot-time flash partition and memory diagnostics
+- **Database Worker Queue** — FreeRTOS task prevents SQLite corruption from concurrent BLE callbacks
+- **Quote-Aware Parser** — Support for multi-word service names: `add "Google Mail" user pass`
+- **Emergency Recovery** — `db_reset` command for corrupted database recovery
+- **Secure Token Generation** — Uses `esp_random()` hardware RNG (32-bit tokens, 128-bit upgrade in progress)
 
 **In Progress:**
-- Flutter client implementation (reference code provided in flutreadme.md)
-- App resynchronization testing (ghost connections, crash recovery, OS unpair scenarios)
-- Token size upgrade (32-bit → 128-bit for enhanced security)
+- Flutter client ECDH/session encryption (guide complete, code in progress)
+- Token size upgrade (32-bit → 128-bit)
+- App resynchronization and crash recovery testing
 
 **Planned (Sprint 3 Remaining - Dec 2025):**
-- Remove plaintext passwords over BLE (encrypt with session key)
-- AES-GCM migration (authenticated encryption with integrity checks)
+- Remove plaintext passwords over BLE (AES-GCM upgrade for authenticated encryption)
 - Dynamic PIN generation (per-pairing session displayed on OLED)
+- Message authentication and replay protection (CTR → GCM, add sequence numbers)
+- Fix database key persistence (credentials lost on reboot)
 
 ## Quick Start
 
@@ -186,28 +188,21 @@ Completed:
 
 **Sprint 3 (Nov 30 - Dec 13, 2025) - IN PROGRESS**
 
-Completed (Nov 25):
-- ✅ Database worker queue (US-001, 5 points)
-  - FreeRTOS task with command queue (10 capacity)
-  - Thread-safe public API with task notifications
-  - Prevents SQLite corruption from concurrent BLE callbacks
-  - Queue depth: 10 commands, worker priority: 5, stack: 8KB
-- ✅ Quote-aware command parser
-  - Supports: `add "Google Mail" user@example.com password`
-  - Backward compatible with non-quoted strings
-- ✅ Fixed LIST output format (removed pipe separator)
-  - Old: `instagram | vmalani27.github.io\n`
-  - New: `instagram vmalani27.github.io\n`
-- ✅ Emergency recovery command: `db_reset`
-  - Deletes corrupted database files
-  - Recreates fresh database
-  - No auth required (emergency use only)
-- ✅ Updated COMMAND_REFERENCE.md with best practices
+Completed:
+- Database worker queue (US-001, 5 points)
+- Quote-aware command parser
+- Fixed LIST output format (removed pipe separator)
 
 In Progress:
-- App resynchronization testing (ghost connections, crash recovery scenarios)
-- Flutter client integration testing
+- App resynchronization and crash recovery testing
+- Flutter client integration (ECDH/session encryption)
+- Token size upgrade (32-bit → 128-bit)
 
+Remaining (Planned):
+- Remove plaintext passwords over BLE (AES-GCM upgrade)
+- Dynamic PIN generation
+- Message authentication and replay protection
+- Fix database key persistence
 Remaining:
 - US-002: Remove plaintext passwords over BLE (3 points)
 - US-003: Strengthen session tokens (1 point)

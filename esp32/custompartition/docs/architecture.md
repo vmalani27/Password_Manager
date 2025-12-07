@@ -93,93 +93,40 @@ Send "ENC:<base64(nonce + ciphertext)>" over BLE (encrypted)
 ```
 1. Client connects → BLE pairing (PIN: 123456)
 2. Client reads ESP32 public key (ECDH characteristic)
-3. Client generates ephemeral key pair
-4. Client sends public key → ESP32
-5. Both compute shared_secret = ECDH(private_own, public_other)
-6. Both derive session_key = HKDF(shared_secret, salt, info)
-7. Client sends "ecdh_auth"
-8. ESP32 sends random challenge (16 bytes)
-9. Client computes HMAC(session_key, challenge)
-10. ESP32 verifies HMAC → AUTH OK
-11. Session authorized for commands
-```
-
----
 
 ## Current Implementation Status
 
-### ✅ Phase 0 - Cleanup & Stabilization (COMPLETE)
+### [32mPhase 0 - Cleanup & Stabilization (COMPLETE)[0m
+All repository and build system setup, codebase migrated to PlatformIO, and legacy code removed.
 
-**0.1 - Repository Structure**
-- ✅ Migrated from Arduino IDE to PlatformIO
-- ✅ Created docs: ROADMAP.md, TODO.md, CHANGELOG.md, PROTOCOL.md
-- ✅ Organized: /src, /lib, /docs, /test
+### [32mPhase 1.1 - Cryptographic Security (COMPLETE)[0m
+eFuse-based runtime key, AES-256-CBC for database, IV per password, and secure buffer handling are all implemented.
 
-**0.2 - Codebase Clean Boot**
-- ✅ Removed async key manager (startKeyManagerTask)
-- ✅ Made key derivation synchronous (deriveRuntimeKey)
-- ✅ Clean compilation under PlatformIO
-- ✅ Removed Arduino-IDE legacy code
+### [32mPhase 1.2 - Authentication Security (COMPLETE on ESP32, IN PROGRESS on Flutter)[0m
+- ECDH key exchange, challenge-response, device binding, and pairing state machine are fully implemented on ESP32.
+- BLE pairing uses static PIN (123456) — **dynamic PIN not yet implemented**.
+- Flutter client: ECDH/session encryption guide complete, code in progress.
+- Legacy token-based auth still present (32-bit, being upgraded to 128-bit).
 
-**0.3 - Stability Fixes**
-- ✅ Removed buggy connection timeout logic (waiting for ECDH)
-- ✅ Fixed BLE callback crashes
-- ✅ Removed plaintext token logging (partial - still logs token value)
+### [33mPhase 1.3 - Credential Lifecycle (PARTIAL)[0m
+- Database worker queue (FreeRTOS) is **implemented** (prevents SQLite corruption).
+- Atomic backups, journaling, and IV randomness testing are **planned**.
 
-### ✅ Phase 1.1 - Cryptographic Security (COMPLETE)
+### [33mPhase 1.4 - UX & Protocol (PARTIAL)[0m
+- Command protocol (add, get, update, delete, list, logout, request_token, auth, ecdh_auth, respond) is **implemented and encrypted** (CTR mode).
+- Protocol documentation is **incomplete**.
+- Display: OLED status, connection, and command notifications are implemented. **Security indicators missing.**
 
-**Runtime Key System**
-- ✅ eFuse BLOCK3 reader (256-bit hardware key)
-- ✅ HMAC-SHA256 key derivation with random challenge
-- ✅ Synchronous initialization (no race conditions)
-- ✅ Zero sensitive buffers on use
-- ✅ Runtime key used for password encryption/decryption
+---
 
-**Database Encryption**
-- ✅ AES-256-CBC encryption for passwords
-- ✅ Random IV generation per password
-- ✅ Encrypted storage: {encrypted_password BLOB, iv BLOB}
-- ✅ PKCS7 padding implementation
-
-### 🔶 Phase 1.2 - Authentication Security (MOSTLY COMPLETE)
-
-**ECDH Implementation (ESP32 Side - COMPLETE)**
-- ✅ secp256r1 (NIST P-256) elliptic curve
-- ✅ Ephemeral key pair generation using mbedTLS
-- ✅ Public key exposure via BLE characteristic
-- ✅ Client public key reception
-- ✅ Shared secret computation
-- ✅ HKDF-like session key derivation (manual HMAC-based)
-- ✅ Challenge-response authentication
-- ✅ ECDH state cleanup on disconnect
-- ✅ **NVS device binding** (persistent pairing across reboots)
-- ✅ **Pairing state machine** (UNPAIRED → PAIRED)
-- ✅ **Device verification** (reject unauthorized clients when paired)
-- ✅ **Unpair command** (factory reset for pairing)
-
-
-**BLE Security**
-- ✅ BLE pairing with static PIN (123456) - needs replacement
-- ✅ Secure connections (SC) enabled
-- ✅ MITM protection
-- ✅ Bonding required
-- ✅ Device binding (ECDH key pairing in NVS)
-- ❌ Dynamic passkey generation (TODO)
-
-**Legacy Auth (Still Active)**
-- ✅ Token-based authentication (32-bit, weak)
-- ✅ Rate limiting (5 attempts → 1 minute lockout)
-- ✅ Session tokens
-- 🔄 Will be deprecated after ECDH is fully working
-
-### ❌ Phase 1.3 - Credential Lifecycle (NOT STARTED)
-
-- ❌ DB worker queue (move SQLite ops out of BLE callbacks)
-- ❌ Atomic backups
-- ❌ Journaling
-- ❌ Randomness testing for IVs
-
-### ❌ Phase 1.4 - UX & Protocol (PARTIAL)
+### **Summary of Gaps and Next Steps**
+- **AES-GCM migration** (for authenticated encryption) — **not started**
+- **Dynamic PIN generation** — **not started**
+- **Message authentication and replay protection** — **not started**
+- **Database key persistence** — **critical blocker, not fixed**
+- **Sensitive logging removal** — **not started**
+- **Flutter client integration** — **in progress**
+- **Testing (unit/integration/security)** — **not started**
 
 **Command Protocol (Working)**
 - ✅ Commands: add, get, update, delete, list, logout

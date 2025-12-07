@@ -2,7 +2,22 @@
 
     A secure Bluetooth Low Energy (BLE) password manager using Flutter and ESP32 with ECDH key exchange and device pairing.
 
-    ## Security Features
+
+## Recent UI & State Management Changes (Dec 2025)
+
+- Credential Manager and Details pages now use a reusable `ActionButton` widget for all major actions (Details, Update, Delete, etc.), with a rectangular style and small corner radius for a modern look.
+- Passwords are hidden by default in the details page and revealed only when the user taps the eye icon; password is fetched on demand.
+- Removed filter dropdown (Favorites/Recently Used) for a simpler UI; only search remains.
+- All Riverpod provider state updates in async methods are now deferred to microtasks to prevent build-phase modification errors.
+- Navigation to details page is now deferred to avoid provider modification during build.
+- Improved error handling and user feedback for session timeouts and connection loss.
+- (If enabled) Unlocking after session lock now prompts for fingerprint/biometric authentication before re-authenticating.
+
+See TODO.md for a more detailed changelog and next steps.
+
+---
+
+## Security Features
 
     ### ✅ Implemented (Current State)
 

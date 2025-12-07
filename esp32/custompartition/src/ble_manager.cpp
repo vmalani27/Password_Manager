@@ -322,8 +322,8 @@ bool BLEManager::begin() {
     return true;
 }
 
-// Send notification to client
-void BLEManager::sendNotification(const String& data) {
+// Send notification to client, with optional forcePlaintext
+void BLEManager::sendNotification(const String& data, bool forcePlaintext) {
     if (!pCharacteristic) {
         UIManager::getInstance().updateOutput("pCharacteristic is null.");
         return;
@@ -332,18 +332,17 @@ void BLEManager::sendNotification(const String& data) {
         UIManager::getInstance().updateOutput("pServer is null.");
         return;
     }
-    
+
     int connectedCount = pServer->getConnectedCount();
-    
+
     if (connectedCount > 0) {
-        // Encrypt response if session is active
         CryptoManager& crypto = CryptoManager::getInstance();
-        if (crypto.isEcdhReady()) {
+        if (crypto.isEcdhReady() && !forcePlaintext) {
             // Encrypt with session key (AES-256-CTR)
             uint8_t ciphertext[MAX_SESSION_ENCRYPTED_SIZE];
             uint8_t nonce[NONCE_SIZE];
             size_t ciphertext_len;
-            
+
             const uint8_t* session_key = crypto.getSessionKey();
             if (encrypt_session(session_key, (const uint8_t*)data.c_str(), data.length(),
                               ciphertext, &ciphertext_len, nonce)) {
@@ -352,7 +351,7 @@ void BLEManager::sendNotification(const String& data) {
                 uint8_t combined[MAX_SESSION_ENCRYPTED_SIZE + NONCE_SIZE];
                 memcpy(combined, nonce, NONCE_SIZE);
                 memcpy(combined + NONCE_SIZE, ciphertext, ciphertext_len);
-                
+
                 // Base64 encode
                 size_t base64_len;
                 unsigned char base64_buf[MAX_SESSION_ENCRYPTED_SIZE * 2];
@@ -369,7 +368,7 @@ void BLEManager::sendNotification(const String& data) {
                 Serial.println("ERROR: Session encryption failed");
             }
         } else {
-            // No session key - send plaintext (for public commands like ECDH_OK)
+            // Force plaintext (for ECDH handshake or public commands)
             pCharacteristic->setValue(data.c_str());
             pCharacteristic->notify();
             Serial.println("BLE: Plaintext notification sent: " + data);
@@ -388,130 +387,14 @@ String BLEManager::generateSessionToken() {
     sessionToken = String(buf);
     return sessionToken;
 }
-
 // Clear session
 void BLEManager::clearSession() {
     sessionAuthorized = false;
     sessionToken = "";
     failedAuthAttempts = 0;
-}
-
-// Increment failed auth attempts
-void BLEManager::incrementFailedAuth() {
-    failedAuthAttempts++;
-}
-
-// Set lockout
-void BLEManager::setLockout() {
-    lockoutUntilMs = millis() + LOCKOUT_DURATION_MS;
-    failedAuthAttempts = 0;
-}
-
-// Check for inactivity timeout
-void BLEManager::checkInactivityTimeout() {
-    unsigned long now = millis();
-    
-    // Check periodically
-    if (now - lastInactivityCheck < INACTIVITY_CHECK_INTERVAL) {
-        return;
-    }
-    lastInactivityCheck = now;
-    
-    if (!pServer || pServer->getConnectedCount() == 0) return;
-    
-    unsigned long idleTime = now - lastActivityMs;
-    
-    // Force disconnect after CONNECTION_TIMEOUT
-    if (idleTime > CONNECTION_TIMEOUT_MS) {
-        Serial.println("TIMEOUT: Connection timeout - forcing disconnect");
-        clearSession();
-        CryptoManager::getInstance().clearECDH();
-        
-        if (pServer) {
-            pServer->disconnect(0);  // Disconnect all clients
-        }
-        
-        delay(100);
-        
-        // Restart advertising
-        BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-        pAdvertising->start();
-        Serial.println("TIMEOUT: Advertising restarted");
-        return;
-    }
-    
-    // Clear session after SESSION_TIMEOUT (but stay connected)
-    if (sessionAuthorized && idleTime > SESSION_TIMEOUT_MS) {
-        Serial.println("TIMEOUT: Session timeout - clearing authorization");
-        clearSession();
-        sendNotification("SESSION_TIMEOUT");
-    }
-}
-
-// Check unpair button (physical button on ESP32)
-void BLEManager::checkUnpairButton() {
-    bool buttonState = digitalRead(UNPAIR_BUTTON_PIN) == LOW;  // Active low (pulled up)
-    
-    if (buttonState && !buttonPressed) {
-        // Button just pressed
-        buttonPressed = true;
-        buttonPressStartTime = millis();
-        Serial.println("UNPAIR BUTTON: Pressed (hold for 3 seconds)");
-    } else if (!buttonState && buttonPressed) {
-        // Button released
-        buttonPressed = false;
-        Serial.println("UNPAIR BUTTON: Released");
-    } else if (buttonPressed) {
-        // Button still held - check if held long enough
-        unsigned long holdTime = millis() - buttonPressStartTime;
-        if (holdTime >= BUTTON_HOLD_TIME_MS) {
-            // Trigger unpair
-            Serial.println("UNPAIR BUTTON: 3 seconds elapsed - unpairing device");
-            UIManager::getInstance().updateOutput("UNPAIR BUTTON");
-            
-            // Clear session
-            clearSession();
-            
-            // Unpair from NVS
-            CryptoManager& crypto = CryptoManager::getInstance();
-            if (crypto.unpairDevice()) {
-                Serial.println("UNPAIR BUTTON: Device unpaired successfully");
-                UIManager::getInstance().updateOutput("Device UNPAIRED");
-                
-                // Disconnect any connected clients
-                if (pServer && pServer->getConnectedCount() > 0) {
-                    sendNotification("UNPAIRED");
-                    delay(100);
-                    pServer->disconnect(0);
-                }
-                
-                // Clear all bonding info from BLE stack
-                int dev_num = esp_ble_get_bond_device_num();
-                if (dev_num > 0) {
-                    esp_ble_bond_dev_t *bond_dev = (esp_ble_bond_dev_t *)malloc(sizeof(esp_ble_bond_dev_t) * dev_num);
-                    if (bond_dev) {
-                        esp_ble_get_bond_device_list(&dev_num, bond_dev);
-                        for (int i = 0; i < dev_num; i++) {
-                            esp_ble_remove_bond_device(bond_dev[i].bd_addr);
-                            Serial.println("UNPAIR BUTTON: Removed BLE bond");
-                        }
-                        free(bond_dev);
-                    }
-                }
-                
-                // Restart advertising
-                delay(500);
-                BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-                pAdvertising->start();
-                Serial.println("UNPAIR BUTTON: Ready for new pairing");
-            } else {
-                Serial.println("UNPAIR BUTTON: Failed to unpair");
-                UIManager::getInstance().updateOutput("Unpair failed");
-            }
-            
-            buttonPressed = false;  // Reset to prevent repeated triggers
-        }
-    }
+    lockoutUntilMs = 0;
+    // Optionally also reset activity timestamp
+    lastActivityMs = millis();
 }
 
 // Main loop - call from loop()

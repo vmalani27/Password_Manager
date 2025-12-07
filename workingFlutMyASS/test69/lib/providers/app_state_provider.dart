@@ -353,26 +353,33 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
 
     try {
-      state = state.copyWith(isLoading: true, clearError: true);
-      
+      // Defer state update to avoid provider modification during build/lifecycle
+      await Future.microtask(() {
+        state = state.copyWith(isLoading: true, clearError: true);
+      });
+
       final credentials = await credentialService.listCredentials(deviceId);
-      
-      state = state.copyWith(
-        credentials: credentials,
-        isLoading: false,
-      );
-      
-      debugPrint('[AppState] Refreshed ${credentials.length} credentials');
+
+      await Future.microtask(() {
+        state = state.copyWith(
+          credentials: credentials,
+          isLoading: false,
+        );
+      });
+
+      debugPrint('[AppState] Refreshed {credentials.length} credentials');
     } catch (e) {
       // Check if this is a session timeout or NOT AUTHORIZED
       if (e.toString().contains('SESSION_TIMEOUT') || e.toString().contains('NOT AUTHORIZED')) {
         debugPrint('[AppState] Session timeout detected during refresh');
         _handleSessionTimeout();
       } else {
-        state = state.copyWith(
-          isLoading: false,
-          errorMessage: 'Failed to load credentials: $e',
-        );
+        await Future.microtask(() {
+          state = state.copyWith(
+            isLoading: false,
+            errorMessage: 'Failed to load credentials: $e',
+          );
+        });
       }
     }
   }
@@ -440,19 +447,23 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
 
     try {
-      state = state.copyWith(isLoading: true, clearError: true);
-      
+      await Future.microtask(() {
+        state = state.copyWith(isLoading: true, clearError: true);
+      });
+
       final password = await credentialService.getPassword(
         service: service,
         identifier: identifier,
       );
-      
-      state = state.copyWith(isLoading: false);
-      
+
+      await Future.microtask(() {
+        state = state.copyWith(isLoading: false);
+      });
+
       if (password == null) {
         throw Exception('Password not found');
       }
-      
+
       debugPrint('[AppState] Retrieved password for $service / $identifier');
       return password;
     } catch (e) {
@@ -460,10 +471,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
         debugPrint('[AppState] Session timeout detected during get password');
         _handleSessionTimeout();
       } else {
-        state = state.copyWith(
-          isLoading: false,
-          errorMessage: 'Failed to get password: $e',
-        );
+        await Future.microtask(() {
+          state = state.copyWith(
+            isLoading: false,
+            errorMessage: 'Failed to get password: $e',
+          );
+        });
       }
       rethrow;
     }

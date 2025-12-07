@@ -33,61 +33,45 @@ This roadmap defines long-term product vision and feature delivery timeline. For
 
 ---
 
+
 ## Phase 1: Protocol Hardening (IN PROGRESS)
 
 **Timeline:** 4-6 weeks  
-**Status:** Sprint 2 of 4  
+**Status:** Sprint 3 of 4  
 **Target Completion:** December 2025
 
 **Goals:**
-- Implement cryptographic authentication
-- Secure communication protocol
-- Prevent common attack vectors
-- Finalize software architecture
+- Implement cryptographic authentication (**DONE**)
+- Secure communication protocol (**DONE**)
+- Prevent common attack vectors (**IN PROGRESS**)
+- Finalize software architecture (**IN PROGRESS**)
 
-### Phase 1.1: Cryptographic Security (COMPLETED)
+### Phase 1.1: Cryptographic Security (**COMPLETE**)
+**All deliverables complete.**
 
-**Deliverables:**
-- [x] Runtime key derivation from eFuse
-- [x] AES-256-CBC encryption for credentials
-- [x] IV generation and storage
-- [x] Secure buffer management (zeroing)
+### Phase 1.2: Authentication Security (**COMPLETE on ESP32, IN PROGRESS on Flutter**)
+- ECDH key exchange, HKDF session key, challenge-response, device binding, and unauthorized device rejection are all implemented on ESP32.
+- Flutter ECDH client implementation: **Guide complete, code in progress**
 
-### Phase 1.2: Authentication Security (MOSTLY COMPLETE)
-
-**Deliverables:**
-- [x] ECDH key exchange (secp256r1)
-- [x] HKDF session key derivation
-- [x] Challenge-response authentication (HMAC-SHA256)
-- [x] Device binding with NVS persistence
-- [x] Unauthorized device rejection
-- [ ] Flutter ECDH client implementation (guide complete, code pending)
-
-### Phase 1.3: Data Integrity (PLANNED)
-
+### Phase 1.3: Data Integrity (**PARTIAL**)
 **Target:** Sprint 3 (Dec 1-15, 2025)
+- Database worker queue: **DONE**
+- Atomic database operations: **PLANNED**
+- AES-GCM migration (authenticated encryption): **PLANNED**
+- Session token strengthening (128-bit): **IN PROGRESS**
 
-**Deliverables:**
-- [ ] Database worker queue (prevent corruption)
-- [ ] Atomic database operations
-- [ ] AES-GCM migration (authenticated encryption)
-- [ ] Session token strengthening (128-bit minimum)
-
-### Phase 1.4: Command Security (PLANNED)
-
+### Phase 1.4: Command Security (**PLANNED**)
 **Target:** Sprint 4 (Dec 15-31, 2025)
-
-**Deliverables:**
-- [ ] Encrypt commands with session key
-- [ ] Remove plaintext password transmission
-- [ ] Dynamic PIN generation and storage
-- [ ] Audit all security-sensitive logging
+- Encrypt commands with session key: **CTR mode implemented, GCM planned**
+- Remove plaintext password transmission: **PLANNED**
+- Dynamic PIN generation and storage: **PLANNED**
+- Audit all security-sensitive logging: **PLANNED**
 
 **Phase 1 Success Criteria:**
-- Zero known authentication bypasses
-- All credentials encrypted at rest and in transit
-- Complete cryptographic device binding
-- Documented protocol specification
+- Zero known authentication bypasses (**IN PROGRESS**)
+- All credentials encrypted at rest and in transit (**CTR mode, GCM planned**)
+- Complete cryptographic device binding (**DONE**)
+- Documented protocol specification (**IN PROGRESS**)
 
 ---
 

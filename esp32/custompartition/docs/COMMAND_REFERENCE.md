@@ -1,6 +1,14 @@
 ﻿# ESP32 Password Manager - Command Reference
 
+
 This document provides a complete reference for all BLE commands supported by the ESP32 Password Manager.
+
+**Implementation Status (as of Dec 2025):**
+- All credential commands (add, get, update, delete, list, logout) are encrypted over BLE using AES-256-CTR (session key from ECDH).
+- ECDH handshake and pairing commands are plaintext (by design).
+- Token-based authentication is still present (32-bit, being upgraded to 128-bit).
+- Static PIN (123456) is still used for pairing (dynamic PIN planned).
+- AES-GCM upgrade (for authenticated encryption) is planned but not yet implemented.
 
 ## Connection Flow
 
@@ -222,7 +230,7 @@ Retrieve a password for a specific service and identifier.
 ← Password: MySecretPass123
 ```
 
-**Security Note:** Password is currently transmitted in plaintext over BLE (protected by BLE link encryption). Upgrading to encrypted responses is planned (US-002).
+**Security Note:** Passwords are now encrypted in transit over BLE using AES-256-CTR (session key from ECDH). AES-GCM upgrade (for authenticated encryption and integrity) is planned.
 
 ---
 
@@ -362,6 +370,7 @@ Use quotes for service names containing spaces:
 ← Password: password123
 ```
 
+
 ### Security Tips
 
 1. **Always logout when done:** Use `logout` before closing app
@@ -369,6 +378,7 @@ Use quotes for service names containing spaces:
 3. **Unique passwords:** Don't reuse passwords across services
 4. **Regular updates:** Update passwords periodically using `update`
 5. **Audit regularly:** Use `list` to review stored credentials
+6. **Upgrade planned:** Dynamic PIN, AES-GCM, and message authentication are planned for future releases.
 
 ### Emergency Recovery
 

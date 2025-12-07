@@ -6,198 +6,59 @@ Active tasks for current development sprint. Organized by priority tier using Ag
 
 This is the working task list for current sprint (2-week iteration). For long-term planning, see ROADMAP.md. For technical specifications, see ARCHITECTURE.md.
 
-## Current Sprint
+## Current Sprint (Sprint 3: Dec 1-15, 2025)
 
-**Sprint 2:** November 15 - November 29, 2025  
-**Sprint Goal:** Complete ECDH authentication and begin database safety improvements  
-**Team Velocity:** ~8 story points per sprint (1 developer)
+**Status:** In Progress
 
 ---
 
-## Backlog Items
-
-### Epic: Authentication & Device Binding
-
-**Status:** 80% Complete
-
-**Completed Stories:**
-- [DONE] Implement ECDH key exchange - 3 points
-  - Acceptance: secp256r1 curve, HKDF session key derivation working
-  
-- [DONE] Implement challenge-response auth - 2 points
-  - Acceptance: HMAC-SHA256 verification passes for valid clients
-  
-- [DONE] Add device binding with NVS - 3 points
-  - Acceptance: Paired device keys persist across reboots, unauthorized devices rejected
-
-- [DONE] Flutter ECDH client implementation - 5 points
-  - Status: Implementation guide complete, awaiting Flutter development
-  - Blockers: None (parallel track)
+### Completed Stories
+- [DONE] ECDH key exchange (ESP32 side)
+- [DONE] Challenge-response authentication (ESP32 side)
+- [DONE] Device binding with NVS (ESP32 side)
+- [DONE] Database worker queue (FreeRTOS task, prevents SQLite corruption)
+- [DONE] Quote-aware command parser
+- [DONE] Emergency recovery (`db_reset` command, physical unpair button)
 
 ---
 
-## Sprint 2 Committed Work
-
-### TIER S: Critical (Must Complete)
-
-#### US-001: Database Worker Queue
-**Priority:** P0 (Critical)  
-**Story Points:** 5  
-**Status:** Not Started
-
-**User Story:**
-As a developer, I need SQLite operations to run in a dedicated worker task so that concurrent BLE callback access doesn't corrupt the database.
-
-**Acceptance Criteria:**
-- [ ] Create FreeRTOS task for database operations
-- [ ] Implement QueueHandle_t for command passing
-- [ ] BLE callbacks enqueue commands instead of direct DB access
-- [ ] Worker task processes queue and sends responses
-- [ ] Test with rapid concurrent commands (10 requests/second)
-
-**Technical Notes:**
-```cpp
-// Create queue in setup()
-QueueHandle_t dbQueue = xQueueCreate(10, sizeof(DbCommand));
-
-// BLE callback enqueues
-DbCommand cmd = {.type = GET_PASSWORD, .site = "github.com"};
-xQueueSend(dbQueue, &cmd, 0);
-
-// Worker task processes
-xTaskCreate(dbWorkerTask, "DB_Worker", 4096, NULL, 5, NULL);
-```
-
-**Definition of Done:**
-- Code compiles without warnings
-- No database corruption after 100 rapid operations
-- Response time under 500ms per operation
+### In Progress
+- [IN PROGRESS] Flutter client ECDH/session encryption (guide complete, code pending)
+- [IN PROGRESS] Token size upgrade (32-bit → 128-bit)
+- [IN PROGRESS] App resynchronization and crash recovery testing
 
 ---
 
-#### US-002: Remove Plaintext Passwords Over BLE
-**Priority:** P0 (Critical)  
-**Story Points:** 3  
-**Status:** Not Started  
-**Dependencies:** Requires session_key from ECDH
-
-**User Story:**
-As a security-conscious user, I need passwords encrypted during BLE transmission so that sniffing attacks cannot capture credentials.
-
-**Acceptance Criteria:**
-- [ ] Encrypt password with AES-GCM using session_key
-- [ ] Include nonce and authentication tag
-- [ ] Flutter client decrypts with same session_key
-- [ ] Remove all `sendNotification("Password: " + pw)` calls
-- [ ] Test with BLE sniffer to verify encryption
-
-**Implementation:**
-```cpp
-// ESP32 side
-String encryptedPw = encryptWithSessionKey(password, session_aes_key);
-sendNotification("ENCRYPTED_PW:" + encryptedPw);
-
-// Flutter side
-String decrypted = decryptWithSessionKey(encryptedPw, sessionKey);
-```
-
-**Definition of Done:**
-- Wireshark BLE capture shows no plaintext passwords
-- Flutter successfully decrypts all passwords
-- Error handling for decryption failures
-
----
-
-#### US-003: Strengthen Session Tokens
-**Priority:** P1 (High)  
-**Story Points:** 1  
-**Status:** Not Started
-
-**User Story:**
-As a security engineer, I need session tokens to be 128-bit minimum so that brute force attacks are infeasible during the deprecation period before legacy auth is removed.
-
-**Acceptance Criteria:**
-- [ ] Replace `random()` with `esp_random()`
-- [ ] Generate 16 bytes (128 bits) minimum
-- [ ] Convert to hex string for transmission
-- [ ] Update Flutter client to handle longer tokens
-- [ ] Add note that this is temporary (will be removed after ECDH fully deployed)
-
-**Implementation:**
-```cpp
-String generateSessionToken() {
-    uint8_t token[16];
-    for (int i = 0; i < 16; i++) {
-        token[i] = esp_random() & 0xFF;
-    }
-    return bytesToHex(token, 16);
-}
-```
-
-**Definition of Done:**
-- Token entropy verified (Shannon entropy > 7.5)
-- Legacy auth still works with new tokens
-- Documented as deprecated in code comments
-
----
-
-## Sprint 3 Planned Work (Dec 1-15, 2025)
-
-### TIER A: High Security
-
-#### US-004: Migrate AES-CBC to AES-GCM
-**Priority:** P0 (Critical)  
-**Story Points:** 5
-
-**User Story:**
-As a security engineer, I need authenticated encryption for password storage so that database tampering is detectable.
-
-**Acceptance Criteria:**
-- [ ] Replace mbedtls_aes_crypt_cbc with mbedtls_gcm_crypt_and_tag
-- [ ] Store {nonce || tag || ciphertext} in database
-- [ ] Verify authentication tag on decrypt
-- [ ] Migrate existing credentials to new format
-- [ ] Update secure_core library API
-
----
-
-#### US-005: Remove Static BLE PIN
-**Priority:** P1 (High)  
-**Story Points:** 3
-
-**User Story:**
-As a user, I need a unique BLE PIN per device so that the default PIN (123456) vulnerability is eliminated.
-
-**Acceptance Criteria:**
-- [ ] Generate random 6-digit PIN on first boot
-- [ ] Store PIN in NVS
-- [ ] Display PIN on OLED once during pairing
-- [ ] Add "show PIN" command for re-display if forgotten
-- [ ] Update Flutter app to prompt for PIN input
+### Not Started / Blocked
+- [NOT STARTED] Remove plaintext passwords over BLE (encrypt with session key, AES-GCM planned)
+- [NOT STARTED] Migrate AES-CBC to AES-GCM for database (authenticated encryption)
+- [NOT STARTED] Dynamic PIN generation (replace static 123456)
+- [NOT STARTED] Message authentication and replay protection (CTR → GCM, add sequence numbers)
+- [NOT STARTED] Fix database key persistence (credentials lost on reboot)
+- [NOT STARTED] Enable NVS flash encryption (sdkconfig)
+- [NOT STARTED] Remove sensitive logging (tokens in serial)
+- [NOT STARTED] Add backup/recovery mechanism
 
 ---
 
 ## Backlog (Not Committed)
 
 ### TIER B: Refactoring
-
-**US-006:** Split main.cpp into modules - 8 points  
-**US-007:** Normalize logging system - 2 points  
-**US-008:** Simplify BLE initialization - 1 point
+- Split main.cpp into modules
+- Normalize logging system
+- Simplify BLE initialization
 
 ### TIER C: Cleanup
-
-**US-009:** Extract constants to config.h - 1 point  
-**US-010:** Add watchdog timer - 2 points  
-**US-011:** Add version info to advertising - 1 point
+- Extract constants to config.h
+- Add watchdog timer
+- Add version info to advertising
 
 ---
 
 ## Sprint Burndown
-
-**Total Committed:** 9 story points  
-**Completed:** 0 points  
-**Remaining:** 9 points
+**Total Committed:** 9 story points
+**Completed:** 5 points
+**Remaining:** 4 points
 
 **Days Remaining:** 7 days  
 **Target Velocity:** 8 points/sprint  
