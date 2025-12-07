@@ -7,6 +7,7 @@ import '../services/permission_service.dart';
 import '../services/pairing_service.dart';
 import 'device_scan_screen.dart';
 import 'credential_manager_screen.dart';
+import 'auth_gate.dart';
 
 /// Home screen - entry point of the app
 /// Shows connection status and navigation options
@@ -438,24 +439,27 @@ class HomeScreen extends ConsumerWidget {
   Future<void> _unpairDevice(BuildContext context, AppStateNotifier notifier) async {
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Unpair Device'),
-        content: const Text(
-          'This will remove the pairing between this phone and the ESP32.\n\n'
-          'You will need to pair again on next connection.\n\n'
-          'Are you sure?'
+      builder: (context) => AuthGate(
+        reason: 'Authenticate to unpair device',
+        child: AlertDialog(
+          title: const Text('Unpair Device'),
+          content: const Text(
+            'This will remove the pairing between this phone and the ESP32.\n\n'
+            'You will need to pair again on next connection.\n\n'
+            'Are you sure?'
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Unpair'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Unpair'),
-          ),
-        ],
       ),
     );
 

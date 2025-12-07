@@ -28,7 +28,7 @@ class BleConnectionService {
   String? _connectedDeviceId;
   models.ConnectionState _currentState = models.ConnectionState.disconnected;
 
-  // Used so we only do the “stale session check” once per app run
+  // Used so we only do the �stale session check� once per app run
   bool _hasCheckedForStaleConnections = false;
 
   /// Stream of discovered devices during scan
@@ -161,7 +161,7 @@ class BleConnectionService {
     }
   }
 
-  /// Optional: one-time “stale session” cleanup before first main connection.
+  /// Optional: one-time �stale session� cleanup before first main connection.
   ///
   /// Connects briefly, asks ESP32 for STATUS, then disconnects so that
   /// any stale AUTHORIZED session is cleared on the device side.
@@ -398,7 +398,7 @@ class BleConnectionService {
       debugPrint('[BleConnection] Error: $e');
       debugPrint('[BleConnection] ========================================');
 
-      // Retry once on the classic Android “disconnect before connect” issue
+      // Retry once on the classic Android �disconnect before connect� issue
       if (retryCount == 0 &&
           e.toString().contains('Disconnected before connection established')) {
         debugPrint(
@@ -469,7 +469,7 @@ class BleConnectionService {
     }
   }
 
-  /// Very simple “connected?” helper for now
+  /// Very simple �connected?� helper for now
   Future<bool> isDeviceConnected(String deviceId) async {
     return _currentState == models.ConnectionState.connected ||
         _currentState == models.ConnectionState.authenticated;

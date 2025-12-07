@@ -40,11 +40,14 @@ final deviceScanProvider = StateNotifierProvider<DeviceScanNotifier, DeviceScanS
 
 class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
   final Ref _ref;
+  bool _bluetoothReady = false;
 
   DeviceScanNotifier(this._ref) : super(const DeviceScanState());
 
+  bool get bluetoothReady => _bluetoothReady;
+
   /// Start scanning for ESP32 devices
-  Future<void> startScan({Duration timeout = const Duration(seconds: 10)}) async {
+  Future<void> startScan({Duration timeout = const Duration(seconds: 10), void Function()? onBluetoothReady, void Function()? onDeviceFound}) async {
     state = state.copyWith(
       isScanning: true,
       clearError: true,
@@ -56,6 +59,7 @@ class DeviceScanNotifier extends StateNotifier<DeviceScanState> {
 
     try {
       final appNotifier = _ref.read(appStateProvider.notifier);
+      final bleService = _ref.read(bleConnectionServiceProvider);
       final devices = await appNotifier.scanForDevices(timeout: timeout);
 
       if (devices.isNotEmpty) {
