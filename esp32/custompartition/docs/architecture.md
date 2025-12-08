@@ -96,37 +96,37 @@ Send "ENC:<base64(nonce + ciphertext)>" over BLE (encrypted)
 
 ## Current Implementation Status
 
-### [32mPhase 0 - Cleanup & Stabilization (COMPLETE)[0m
+### Phase 0 - Cleanup & Stabilization (COMPLETE)
 All repository and build system setup, codebase migrated to PlatformIO, and legacy code removed.
 
-### [32mPhase 1.1 - Cryptographic Security (COMPLETE)[0m
+### Phase 1.1 - Cryptographic Security (COMPLETE)
 eFuse-based runtime key, AES-256-CBC for database, IV per password, and secure buffer handling are all implemented.
 
-### [32mPhase 1.2 - Authentication Security (COMPLETE on ESP32, IN PROGRESS on Flutter)[0m
+### Phase 1.2 - Authentication Security (COMPLETE on ESP32, IN PROGRESS on Flutter)
 - ECDH key exchange, challenge-response, device binding, and pairing state machine are fully implemented on ESP32.
-- BLE pairing uses static PIN (123456) — **dynamic PIN not yet implemented**.
+- BLE pairing uses static PIN (123456) - dynamic PIN not yet implemented.
 - Flutter client: ECDH/session encryption guide complete, code in progress.
 - Legacy token-based auth still present (32-bit, being upgraded to 128-bit).
 
-### [33mPhase 1.3 - Credential Lifecycle (PARTIAL)[0m
-- Database worker queue (FreeRTOS) is **implemented** (prevents SQLite corruption).
-- Atomic backups, journaling, and IV randomness testing are **planned**.
+### Phase 1.3 - Credential Lifecycle (PARTIAL)
+- Database worker queue (FreeRTOS) is implemented (prevents SQLite corruption).
+- Atomic backups, journaling, and IV randomness testing are planned.
 
-### [33mPhase 1.4 - UX & Protocol (PARTIAL)[0m
-- Command protocol (add, get, update, delete, list, logout, request_token, auth, ecdh_auth, respond) is **implemented and encrypted** (CTR mode).
-- Protocol documentation is **incomplete**.
-- Display: OLED status, connection, and command notifications are implemented. **Security indicators missing.**
+### Phase 1.4 - UX & Protocol (PARTIAL)
+- Command protocol (add, get, update, delete, list, logout, request_token, auth, ecdh_auth, respond) is implemented and encrypted (CTR mode).
+- Protocol documentation is incomplete.
+- Display: OLED status, connection, and command notifications are implemented. Security indicators missing.
 
 ---
 
-### **Summary of Gaps and Next Steps**
-- **AES-GCM migration** (for authenticated encryption) — **not started**
-- **Dynamic PIN generation** — **not started**
-- **Message authentication and replay protection** — **not started**
-- **Database key persistence** — **critical blocker, not fixed**
-- **Sensitive logging removal** — **not started**
-- **Flutter client integration** — **in progress**
-- **Testing (unit/integration/security)** — **not started**
+### Summary of Gaps and Next Steps
+- AES-GCM migration (for authenticated encryption) - not started
+- Dynamic PIN generation - not started
+- Message authentication and replay protection - not started
+- Database key persistence - critical blocker, not fixed
+- Sensitive logging removal - not started
+- Flutter client integration - in progress
+- Testing (unit/integration/security) - not started
 
 **Command Protocol (Working)**
 - ✅ Commands: add, get, update, delete, list, logout
